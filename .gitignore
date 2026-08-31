@@ -1,0 +1,24 @@
+# Bajtkod i cache narzędzi
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Środowiska
+.venv/
+venv/
+.env
+
+# Materiały robocze projektu: nagrania, transkrypcje, wyniki, paczki.
+# Setki megabajtów, w całości odtwarzalne z materiałów źródłowych — do repozytorium
+# trafia narzędzie, nie obrabiana książka.
+Data/
+Doktor Dollitle/
+
+# Oceny jakości zbierane lokalnie w studiu weryfikacji
+Interface/reviews.json
+
+# Ustawienia edytorów i systemu
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

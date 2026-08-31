@@ -1,0 +1,43 @@
+# Aplikacja jest przeznaczona na maszyny z kartą NVIDIA.
+# Wymagania hosta: sterowniki NVIDIA + NVIDIA Container Toolkit
+# (na Windows: Docker Desktop z backendem WSL2 i sterownikiem obsługującym WSL).
+#
+#   docker compose up -d --build
+#
+# Gdyby trzeba było uruchomić na maszynie bez GPU: usuń sekcję `deploy` poniżej
+# i zbuduj z --build-arg WITH_CUDA=false. Aplikacja sama przejdzie na CPU (int8),
+# ale transkrypcja będzie kilkanaście razy wolniejsza.
+services:
+  najszybsze-lektury:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: najszybsze-lektury:gpu
+    container_name: najszybsze_lektury_app
+    restart: unless-stopped
+    ports:
+      # Port hosta można zmienić bez edycji pliku: APP_PORT=8010 docker compose up -d
+      - "${APP_PORT:-8000}:8000"
+    volumes:
+      # Materiały źródłowe, cache transkrypcji i gotowe paczki zostają na hoście.
+      - ./Data:/app/Data
+      # Cache modeli Whisper - bez tego każdy nowy kontener pobiera model od nowa.
+      - whisper_models:/root/.cache/huggingface
+    environment:
+      - PYTHONUNBUFFERED=1
+      # Wewnątrz kontenera trzeba nasłuchiwać na 0.0.0.0, inaczej mapowanie portu
+      # nie zadziała i aplikacja będzie nieosiągalna z hosta.
+      - HOST=0.0.0.0
+      - PORT=8000
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+volumes:
+  whisper_models:

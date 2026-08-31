@@ -1,0 +1,15 @@
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.git
+.gitignore
+.env
+.venv
+venv/
+Data/
+Doktor Dollitle/
+Interface/reviews.json
+.pytest_cache/
+.vscode/
+.idea/

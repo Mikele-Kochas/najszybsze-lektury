@@ -1,0 +1,564 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Najszybsze Lektury — Studio Produkcyjne</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@600;700&family=Inter:wght@300;400;500;600;700&family=Merriweather:ital,wght@0,300;0,400;0,700;1,300;1,400&family=Outfit:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="setup.css">
+  <link rel="stylesheet" href="editor.css">
+  <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+  <div class="app-container">
+    <!-- ================= HEADER ================= -->
+    <header class="app-header">
+      <div class="logo-group">
+        <div class="logo-icon">📖</div>
+        <div>
+          <h1 class="app-title">Najszybsze Lektury</h1>
+          <p class="app-subtitle" id="projectSubtitle">Brak projektu — wgraj tekst i nagrania</p>
+        </div>
+      </div>
+
+      <nav class="step-nav" id="stepNav">
+        <button class="step-btn active" data-view="viewProject"><span class="step-num">1</span> Projekt</button>
+        <button class="step-btn" data-view="viewChapters"><span class="step-num">2</span> Rozdziały</button>
+        <button class="step-btn" data-view="viewBoundaries"><span class="step-num">3</span> Granice</button>
+        <button class="step-btn" data-view="viewCuts"><span class="step-num">4</span> Cięcia</button>
+        <button class="step-btn" data-view="viewStudio"><span class="step-num">5</span> Weryfikacja</button>
+        <button class="step-btn" data-view="viewExport"><span class="step-num">6</span> Eksport</button>
+      </nav>
+
+      <div class="header-controls">
+        <span class="device-badge" id="deviceBadge" title="Urządzenie używane przez Whisper">—</span>
+      </div>
+    </header>
+
+    <!-- ================= GLOBAL JOB BAR ================= -->
+    <div class="job-bar" id="jobBar" hidden>
+      <div class="job-bar-head">
+        <span class="job-spinner"></span>
+        <strong id="jobLabel">Zadanie</strong>
+        <span class="job-message" id="jobMessage">—</span>
+        <span class="job-percent" id="jobPercent">0%</span>
+        <button class="btn-micro" id="btnCancelJob">Anuluj</button>
+        <button class="btn-micro" id="btnToggleLog">Log</button>
+      </div>
+      <div class="job-track"><div class="job-fill" id="jobFill"></div></div>
+      <pre class="job-log" id="jobLog" hidden></pre>
+    </div>
+
+    <!-- ================= VIEW 1: PROJEKT ================= -->
+    <section class="view active" id="viewProject">
+      <div class="setup-grid">
+        <div class="panel">
+          <h2 class="panel-title">📥 Wgraj materiały źródłowe</h2>
+          <p class="panel-hint">
+            Jeden plik <strong>.txt</strong> z pełnym tekstem książki oraz komplet nagrań —
+            <strong>jeden plik audio na rozdział</strong>. Wgranie nowych materiałów zastępuje poprzedni projekt.
+          </p>
+
+          <form id="uploadForm">
+            <label class="drop-zone" id="dropText">
+              <input type="file" id="fileText" accept=".txt" hidden>
+              <span class="drop-icon">📄</span>
+              <span class="drop-label" id="dropTextLabel">Przeciągnij plik <b>.txt</b> lub kliknij, aby wybrać</span>
+            </label>
+
+            <label class="drop-zone" id="dropAudio">
+              <input type="file" id="fileAudio" accept=".mp3,.m4a,.wav,.flac,.ogg,.opus,.aac" multiple hidden>
+              <span class="drop-icon">🎧</span>
+              <span class="drop-label" id="dropAudioLabel">Przeciągnij pliki <b>audio</b> (wiele naraz) lub kliknij</span>
+            </label>
+
+            <div id="audioFileList" class="file-chips"></div>
+
+            <div class="form-row">
+              <div class="form-field">
+                <label for="inputTitle">Tytuł książki</label>
+                <input type="text" id="inputTitle" class="styled-input" placeholder="np. Małe Kobietki">
+              </div>
+              <div class="form-field">
+                <label for="inputAuthor">Autor (opcjonalnie)</label>
+                <input type="text" id="inputAuthor" class="styled-input" placeholder="np. Louisa May Alcott">
+              </div>
+            </div>
+
+            <div class="upload-actions">
+              <button type="submit" class="btn btn-primary" id="btnUpload">📥 Wgraj i utwórz projekt</button>
+              <button type="button" class="btn btn-secondary" id="btnResetProject">🗑️ Wyczyść projekt</button>
+            </div>
+            <div class="upload-progress" id="uploadProgress" hidden>
+              <div class="job-track"><div class="job-fill" id="uploadFill"></div></div>
+              <span id="uploadPercent">0%</span>
+            </div>
+          </form>
+        </div>
+
+        <div class="panel">
+          <h2 class="panel-title">⚙️ Ustawienia przetwarzania</h2>
+          <div class="form-field">
+            <label for="setModel">Model Whisper</label>
+            <select id="setModel" class="styled-select">
+              <option value="tiny">tiny — najszybszy, najmniej dokładny (~0,5 GB VRAM)</option>
+              <option value="base">base (~0,7 GB VRAM)</option>
+              <option value="small" selected>small — zalecany kompromis (~1 GB VRAM)</option>
+              <option value="medium">medium — dokładniejszy (~2,5 GB VRAM)</option>
+              <option value="large-v3">large-v3 — najdokładniejszy (~4,7 GB VRAM)</option>
+            </select>
+            <p class="field-note" id="vramNote"></p>
+          </div>
+          <div class="form-field">
+            <label for="setDevice">Urządzenie</label>
+            <select id="setDevice" class="styled-select">
+              <option value="auto" selected>auto — GPU jeśli dostępne</option>
+              <option value="cuda">cuda (NVIDIA)</option>
+              <option value="cpu">cpu</option>
+            </select>
+          </div>
+          <div class="form-row">
+            <div class="form-field">
+              <label for="setMaxLines">Maks. linii na planszy</label>
+              <input type="number" id="setMaxLines" class="styled-input" min="1" max="30" value="11">
+            </div>
+            <div class="form-field">
+              <label for="setMaxChars">Maks. znaków w linii</label>
+              <input type="number" id="setMaxChars" class="styled-input" min="20" max="120" value="45">
+            </div>
+          </div>
+          <button class="btn btn-secondary" id="btnSaveSettings">Zapisz ustawienia</button>
+
+          <div class="status-card" id="projectStatusCard">
+            <h3>Stan projektu</h3>
+            <dl class="status-list" id="projectStatusList">
+              <dt>Tekst</dt><dd id="stText">—</dd>
+              <dt>Nagrania</dt><dd id="stAudio">—</dd>
+              <dt>Mapa rozdziałów</dt><dd id="stMap">—</dd>
+              <dt>Przetworzone</dt><dd id="stProcessed">—</dd>
+            </dl>
+            <p class="archive-note" id="archiveNote" hidden></p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================= VIEW 2: ROZDZIAŁY ================= -->
+    <section class="view" id="viewChapters">
+      <div class="panel">
+        <div class="panel-head-row">
+          <div>
+            <h2 class="panel-title">🧭 Kreator mapowania rozdziałów</h2>
+            <p class="panel-hint" id="mapMethodHint">
+              Aplikacja dopasuje fragmenty tekstu do nagrań. Sprawdź wynik i popraw, jeśli trzeba.
+            </p>
+          </div>
+          <div class="panel-actions">
+            <button class="btn btn-primary" id="btnDetectChapters">🔍 Wykryj rozdziały</button>
+            <button class="btn btn-success-header" id="btnSaveMap" disabled>💾 Zatwierdź mapę</button>
+          </div>
+        </div>
+
+        <div id="mapWarnings" class="warning-stack"></div>
+
+        <div class="table-scroll">
+          <table class="map-table" id="mapTable">
+            <thead>
+              <tr>
+                <th style="width:46px">#</th>
+                <th>Rozdział w tekście</th>
+                <th style="width:230px">Plik audio</th>
+                <th style="width:120px">Zakres znaków</th>
+                <th style="width:90px">Pewność</th>
+                <th style="width:80px">Akcje</th>
+              </tr>
+            </thead>
+            <tbody id="mapTableBody">
+              <tr><td colspan="6" class="table-empty">Kliknij „Wykryj rozdziały”, aby rozpocząć.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head-row">
+          <div>
+            <h2 class="panel-title">⚙️ Przetwarzanie</h2>
+            <p class="panel-hint">Transkrypcja Whisperem, dopasowanie do tekstu książki i podział na plansze.</p>
+          </div>
+          <div class="panel-actions">
+            <label class="toggle-loop"><input type="checkbox" id="chkUseCache" checked><span>Używaj cache transkrypcji</span></label>
+            <button class="btn btn-primary" id="btnProcessAll">▶️ Przetwórz wszystkie</button>
+          </div>
+        </div>
+
+        <div class="table-scroll">
+          <table class="map-table" id="chapterStatusTable">
+            <thead>
+              <tr>
+                <th style="width:46px">#</th>
+                <th>Rozdział</th>
+                <th style="width:200px">Audio</th>
+                <th style="width:90px">Plansze</th>
+                <th style="width:100px">Trafność</th>
+                <th style="width:110px">Status</th>
+                <th style="width:110px">Akcje</th>
+              </tr>
+            </thead>
+            <tbody id="chapterStatusBody">
+              <tr><td colspan="7" class="table-empty">Brak rozdziałów — zatwierdź najpierw mapę.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================= VIEW 3: STUDIO WERYFIKACJI ================= -->
+    <section class="view" id="viewStudio">
+      <div class="studio-toolbar">
+        <div class="mode-switch-group">
+          <button id="btnModeRandom" class="btn-mode active" title="Tryb losowej weryfikacji pojedynczych plansz">
+            🎲 Losowe próbki
+          </button>
+          <button id="btnModeContinuous" class="btn-mode" title="Tryb ciągłego odtwarzania rozdziału">
+            ▶️ Ciągłe odtwarzanie
+          </button>
+        </div>
+
+        <div class="control-group">
+          <label for="chapterSelect">Rozdział:</label>
+          <select id="chapterSelect" class="styled-select">
+            <option value="">Wszystkie / Losowy</option>
+          </select>
+        </div>
+
+        <button id="btnProcessChapter" class="btn btn-secondary" title="Przetwórz ten rozdział">⚙️ Przetwórz</button>
+        <button id="btnNewSample" class="btn btn-primary">🎲 Losuj planszę <span class="kbd-hint">N</span></button>
+        <button id="btnExportZip" class="btn btn-success-header" title="Przejdź do eksportu paczki">📦 Eksport</button>
+      </div>
+
+      <main class="main-workspace">
+        <section class="workspace-left">
+          <div class="chapter-info-bar">
+            <span id="badgeChapter" class="badge badge-indigo">—</span>
+            <span id="badgeChunkInfo" class="badge badge-neutral">—</span>
+            <span id="badgeType" class="badge badge-accent">—</span>
+            <span id="badgeLines" class="badge badge-neutral">—</span>
+            <button id="btnEditBoard" class="badge-btn" title="Edytuj tekst tej planszy">✏️ Edytuj treść</button>
+          </div>
+
+          <div id="unalignedBanner" class="unaligned-banner" style="display: none;">
+            <span>⚠️ <strong>Wtrącenie / Brak w tekście książki</strong></span>
+            <button id="btnAcceptWhisper" class="btn-micro">✨ Użyj tekstu Whispera</button>
+          </div>
+
+          <div class="board-container">
+            <div class="board-card" id="boardCard">
+              <div class="board-texture-overlay"></div>
+              <div class="board-content" id="boardContent">Ładowanie próbki tekstu...</div>
+              <textarea id="boardEditor" class="board-editor" style="display: none;"></textarea>
+              <div id="boardEditControls" class="board-edit-controls" style="display: none;">
+                <button id="btnSaveBoardEdit" class="btn btn-primary btn-sm">Zapisz zmiany</button>
+                <button id="btnCancelBoardEdit" class="btn btn-secondary btn-sm">Anuluj</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="audio-control-panel">
+            <div class="timing-strip">
+              <div class="timing-badge">
+                <span class="time-label">START:</span>
+                <span id="timeStart" class="time-val">00:00:00,000</span>
+              </div>
+              <div class="timing-duration"><span id="durationVal" class="duration-pill">0.0s</span></div>
+              <div class="timing-badge">
+                <span class="time-label">KONIEC:</span>
+                <span id="timeEnd" class="time-val">00:00:00,000</span>
+              </div>
+            </div>
+
+            <div class="waveform-container">
+              <div class="audio-progress-bar" id="progressBar">
+                <div class="audio-progress-fill" id="progressFill"></div>
+                <div class="audio-scrubber" id="progressScrubber"></div>
+              </div>
+            </div>
+
+            <div class="playback-buttons">
+              <button id="btnPlayPause" class="btn-audio-primary" title="Odtwórz / Pauza (Spacja)">
+                <span id="playIcon">▶</span>
+              </button>
+              <button id="btnReplay" class="btn-audio-secondary" title="Powtórz wycinek (R)">🔄 Powtórz</button>
+
+              <div class="speed-selector">
+                <button class="btn-speed active" data-speed="1.0">1.0x</button>
+                <button class="btn-speed" data-speed="1.25">1.25x</button>
+                <button class="btn-speed" data-speed="0.8">0.8x</button>
+              </div>
+
+              <label class="toggle-loop" title="Odtwarzaj w pętli">
+                <input type="checkbox" id="chkLoop"><span>Pętla</span>
+              </label>
+            </div>
+            <audio id="audioElement" preload="auto"></audio>
+          </div>
+
+          <div class="review-action-panel">
+            <div class="review-buttons-grid">
+              <button id="btnOk" class="btn-action btn-success" title="Skrót: Klawisz 1">
+                <span class="btn-icon">✓</span>
+                <div class="btn-text"><strong>Zgodny (OK)</strong><small>Tekst i czas perfekcyjne</small></div>
+                <span class="kbd-key">1</span>
+              </button>
+              <button id="btnMismatch" class="btn-action btn-danger" title="Skrót: Klawisz 2">
+                <span class="btn-icon">✕</span>
+                <div class="btn-text"><strong>Błędne dopasowanie</strong><small>Rozjazd tekstu lub czasu</small></div>
+                <span class="kbd-key">2</span>
+              </button>
+              <button id="btnMissing" class="btn-action btn-warning" title="Skrót: Klawisz 3">
+                <span class="btn-icon">⚠</span>
+                <div class="btn-text"><strong>Brak w źródle</strong><small>Wstęp / outro / lektor</small></div>
+                <span class="kbd-key">3</span>
+              </button>
+            </div>
+
+            <div class="comment-input-row">
+              <input type="text" id="reviewComment" placeholder="Opcjonalny komentarz do tej próbki..." class="styled-input">
+              <button id="btnSaveReview" class="btn btn-secondary">Zapisz uwagę</button>
+            </div>
+          </div>
+        </section>
+
+        <section class="workspace-right">
+          <div class="tabs-header">
+            <button class="tab-btn active" data-tab="tabTimeline">📜 Oś czasu</button>
+            <button class="tab-btn" data-tab="tabDiff">🔍 Whisper vs Książka</button>
+            <button class="tab-btn" data-tab="tabContext">📑 Kontekst</button>
+            <button class="tab-btn" data-tab="tabStats">📊 Statystyki</button>
+          </div>
+
+          <div class="tab-content active" id="tabTimeline">
+            <div class="timeline-header">
+              <input type="text" id="timelineSearch" placeholder="Filtruj tekst na planszach..." class="styled-input">
+              <span class="badge badge-neutral" id="timelineTotalCount">0 plansz</span>
+            </div>
+            <div class="timeline-list" id="timelineList">
+              <div class="timeline-empty">Wybierz lub przetwórz rozdział, aby zobaczyć oś czasu.</div>
+            </div>
+          </div>
+
+          <div class="tab-content" id="tabDiff">
+            <div class="compare-box">
+              <div class="compare-card">
+                <div class="compare-header">
+                  <span class="compare-badge badge-whisper">🤖 Whisper (Co usłyszał model)</span>
+                </div>
+                <div class="compare-body" id="whisperRawText">—</div>
+              </div>
+              <div class="compare-card">
+                <div class="compare-header">
+                  <span class="compare-badge badge-book">📚 Tekst Źródłowy (.txt)</span>
+                </div>
+                <div class="compare-body" id="bookOriginalText">—</div>
+              </div>
+            </div>
+
+            <div class="tip-card">
+              <h4>💡 Skróty klawiszowe:</h4>
+              <ul>
+                <li><kbd>Spacja</kbd> — Odtwórz / Zatrzymaj</li>
+                <li><kbd>R</kbd> — Odtwórz od początku wycinka</li>
+                <li><kbd>1</kbd> — Zgodny (OK)</li>
+                <li><kbd>2</kbd> — Błędne dopasowanie</li>
+                <li><kbd>3</kbd> — Brak tekstu w źródle</li>
+                <li><kbd>N</kbd> — Losuj nową próbkę</li>
+              </ul>
+            </div>
+          </div>
+
+          <div class="tab-content" id="tabContext">
+            <div class="context-container">
+              <div class="context-item context-prev">
+                <div class="context-label">Poprzednia plansza:</div>
+                <div class="context-text" id="prevChunkText">—</div>
+              </div>
+              <div class="context-item context-curr">
+                <div class="context-label">BIEŻĄCA PLANSZA:</div>
+                <div class="context-text" id="currChunkContextText">—</div>
+              </div>
+              <div class="context-item context-next">
+                <div class="context-label">Następna plansza:</div>
+                <div class="context-text" id="nextChunkText">—</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="tab-content" id="tabStats">
+            <div class="stats-overview-grid">
+              <div class="stat-card">
+                <div class="stat-num" id="statAccuracy">100%</div>
+                <div class="stat-title">Trafność dopasowania</div>
+              </div>
+              <div class="stat-card">
+                <div class="stat-num" id="statTotal">0</div>
+                <div class="stat-title">Zweryfikowane próbki</div>
+              </div>
+              <div class="stat-card">
+                <div class="stat-num stat-green" id="statCorrect">0</div>
+                <div class="stat-title">Poprawne (OK)</div>
+              </div>
+              <div class="stat-card">
+                <div class="stat-num stat-red" id="statIncorrect">0</div>
+                <div class="stat-title">Błędne / Rozjazdy</div>
+              </div>
+            </div>
+
+            <div class="history-card">
+              <h4>Ostatnie weryfikacje</h4>
+              <div class="history-list" id="historyList">
+                <div class="history-empty">Brak ocen w tej sesji. Wylosuj próbkę i oceń!</div>
+              </div>
+            </div>
+          </div>
+        </section>
+      </main>
+    </section>
+
+    <!-- ================= VIEW 4: EKSPORT ================= -->
+    <section class="view" id="viewBoundaries">
+      <div class="ed-bar">
+        <select id="bndChapter" class="styled-select" aria-label="Rozdział"></select>
+        <span class="ed-meta" id="bndMeta">—</span>
+        <div class="ed-stats" id="bndStats"></div>
+        <button class="btn btn-secondary" id="bndReset">Przywróć propozycję</button>
+        <button class="btn btn-primary" id="bndAccept">Zatwierdź granice →</button>
+      </div>
+      <div class="bnd-sheet" id="bndDoc">
+        <div class="ed-empty">Wczytywanie…</div>
+      </div>
+    </section>
+
+    <section class="view" id="viewCuts">
+      <div class="ed-bar">
+        <select id="cutChapter" class="styled-select" aria-label="Rozdział"></select>
+        <span class="ed-meta" id="cutMeta">—</span>
+        <div class="ed-stats" id="cutStats"></div>
+        <label class="toggle-loop"><input type="checkbox" id="cutOnlyAtt"><span>Tylko sporne</span></label>
+      </div>
+      <div class="cut-grid">
+        <aside class="cut-list" id="cutList"></aside>
+        <div class="cut-main">
+          <div class="cut-panel">
+            <div class="cut-ctx">
+              <div class="cut-ctxbox">
+                <span class="lb">Koniec planszy <b id="cutLabA">—</b></span>
+                <p id="cutTxtA"></p>
+              </div>
+              <div class="cut-ctxbox">
+                <span class="lb">Początek planszy <b id="cutLabB">—</b></span>
+                <p id="cutTxtB"></p>
+              </div>
+            </div>
+          </div>
+
+          <div class="cut-panel">
+            <div class="cut-head">
+              <span class="cut-time" id="cutTime">00:00,000</span>
+              <span class="cut-delta" id="cutDelta"></span>
+              <span class="cut-badge" id="cutBadge">—</span>
+              <div class="zoombtns" id="cutZoom">
+                <button data-z="1.5">1,5 s</button>
+                <button data-z="4" class="active">4 s</button>
+                <button data-z="12">12 s</button>
+                <button data-z="40">40 s</button>
+              </div>
+            </div>
+            <div id="cutWarn"></div>
+            <canvas id="cutWave"></canvas>
+            <div class="cut-legend">
+              <span><i class="cut-sw" style="background:var(--text-secondary)"></i>fala</span>
+              <span><i class="cut-sw" style="background:var(--bg-card-alt)"></i>cisza</span>
+              <span><i class="cut-sw" style="background:var(--accent-emerald)"></i>wypowiedź lektora</span>
+              <span><i class="cut-sw" style="background:var(--accent-indigo);width:3px"></i>punkt cięcia</span>
+              <span><i class="cut-sw" style="background:var(--border-color);width:3px"></i>sąsiednie cięcie</span>
+            </div>
+            <div class="cut-tools">
+              <div class="grp">
+                <button class="btn btn-secondary nud" data-nudge="-0.1">−100 ms</button>
+                <button class="btn btn-secondary nud" data-nudge="-0.01">−10 ms</button>
+                <button class="btn btn-secondary nud" data-nudge="0.01">+10 ms</button>
+                <button class="btn btn-secondary nud" data-nudge="0.1">+100 ms</button>
+              </div>
+              <button class="btn btn-primary" id="cutPlayJoint">▶ Odsłuchaj styk</button>
+              <button class="btn btn-secondary" id="cutPlayA">▶ Koniec A</button>
+              <button class="btn btn-secondary" id="cutPlayB">▶ Początek B</button>
+              <button class="btn btn-secondary" id="cutReset">Przywróć automat</button>
+              <button class="btn btn-success-header" id="cutVerify">✓ Przejrzane</button>
+            </div>
+            <div class="cut-keys">
+              <kbd>←</kbd> <kbd>→</kbd> przesuń o 10 ms · z <kbd>Shift</kbd> o 100 ms ·
+              <kbd>Spacja</kbd> odsłuchaj styk · <kbd>Enter</kbd> oznacz i przejdź dalej ·
+              <kbd>↑</kbd> <kbd>↓</kbd> zmień cięcie
+            </div>
+          </div>
+
+          <div class="cut-panel">
+            <canvas id="cutMini"></canvas>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="view" id="viewExport">
+      <div class="panel export-panel">
+        <h2 class="panel-title">📦 Eksport paczki produkcyjnej</h2>
+        <p class="panel-hint">
+          Generuje strukturę <code>Książka / Rozdział NN / {Teksty, Audio}</code> —
+          tekst z separatorami <code>///</code>, napisy SRT, etykiety Audacity oraz pocięte pliki audio.
+        </p>
+
+        <div class="export-structure">
+<pre>Książka X/
+└── Rozdział 01/
+    ├── Teksty/
+    │   ├── Tekst_zrodlowy_slashe.txt
+    │   ├── Rozdzial_01.srt
+    │   └── Etykiety_Audacity.txt
+    └── Audio/
+        ├── 001 - Co mi za Boże Narodzenie.mp3
+        └── ...</pre>
+        </div>
+
+        <div class="form-row">
+          <div class="form-field">
+            <label for="exportName">Nazwa paczki</label>
+            <input type="text" id="exportName" class="styled-input" placeholder="Małe Kobietki">
+          </div>
+          <div class="form-field checkbox-field">
+            <label class="toggle-loop">
+              <input type="checkbox" id="chkSliceAudio" checked>
+              <span>Tnij audio na plansze (wolniejsze, wymaga ffmpeg)</span>
+            </label>
+          </div>
+        </div>
+
+        <div class="panel-actions">
+          <button class="btn btn-primary" id="btnBuildExport">🏗️ Zbuduj paczkę</button>
+          <button class="btn btn-success-header" id="btnDownloadZip" disabled>⬇️ Pobierz ZIP</button>
+        </div>
+
+        <div id="exportSummary" class="export-summary" hidden></div>
+      </div>
+    </section>
+
+    <div id="toast" class="toast"></div>
+  </div>
+
+  <script src="app.js"></script>
+  <script src="setup.js"></script>
+  <script src="editor.js"></script>
+</body>
+</html>
