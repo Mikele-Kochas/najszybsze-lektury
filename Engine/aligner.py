@@ -38,12 +38,89 @@ class SequenceAligner:
     def __init__(self, fuzzy_threshold: float = 0.75):
         self.fuzzy_threshold = fuzzy_threshold
 
+    def _find_extras(
+        self,
+        whisper_words: List[WordTimestamp],
+        matched: Dict[int, int],
+        book_word_count: int,
+        placeholder: str,
+        min_duration: float = 1.5,
+        min_words: int = 4,
+    ) -> List[Dict]:
+        """
+        Ciągi słów Whispera bez odpowiednika w tekście książki.
+
+        Każdy dostaje kotwicę: indeks słowa książki, przed którym wstawka wypada.
+        Kotwica 0 to wstęp, kotwica równa liczbie słów rozdziału to stopka, wartości
+        pośrednie to fragment brakujący w środku. Kotwica jest indeksem w tej samej
+        numeracji, której używa podział na plansze, więc da się ją wprost wstawić
+        między plansze bez żadnego przeliczania.
+
+        Progi odsiewają pojedyncze przesłyszenia: krótkie albo kilkuwyrazowe ciągi
+        to zwykle błąd transkrypcji, a nie brakujący akapit.
+        """
+        if not whisper_words:
+            return []
+
+        extras: List[Dict] = []
+        run_start: Optional[int] = None
+
+        for idx in range(len(whisper_words) + 1):
+            unmatched = idx < len(whisper_words) and idx not in matched
+            if unmatched and run_start is None:
+                run_start = idx
+            elif not unmatched and run_start is not None:
+                extras.append(self._make_extra(
+                    whisper_words, matched, run_start, idx, book_word_count, placeholder))
+                run_start = None
+
+        return [
+            e for e in extras
+            if e["end_time"] - e["start_time"] >= min_duration and e["word_count"] >= min_words
+        ]
+
+    @staticmethod
+    def _make_extra(
+        whisper_words: List[WordTimestamp],
+        matched: Dict[int, int],
+        lo: int,
+        hi: int,
+        book_word_count: int,
+        placeholder: str,
+    ) -> Dict:
+        """Opis jednej wstawki wraz ze słowami Whispera i ich czasami."""
+        words = whisper_words[lo:hi]
+        said = " ".join(w.word.strip() for w in words if w.word.strip()).strip()
+
+        # Kotwica: słowo książki odpowiadające pierwszemu dopasowanemu słowu po wstawce.
+        anchor = book_word_count
+        for idx in range(hi, len(whisper_words)):
+            if idx in matched:
+                anchor = matched[idx]
+                break
+        position = "intro" if lo == 0 else ("outro" if anchor >= book_word_count else "inline")
+
+        return {
+            "position": position,
+            "anchor": anchor,
+            "start_time": round(words[0].start, 3),
+            "end_time": round(words[-1].end, 3),
+            "word_count": len(words),
+            "heard": said,
+            "text": (said + "\n" + placeholder) if said else placeholder,
+            "edited": False,
+            "words": [
+                {"w": w.word.strip(), "s": round(w.start, 3), "e": round(w.end, 3)}
+                for w in words if w.word.strip()
+            ],
+        }
+
     def align_chapter(
         self,
         chunks: List[BoardChunk],
         transcription: TranscriptionResult,
         intro_outro_placeholder: str = "(brak tekstu w pliku txt)"
-    ) -> Tuple[List[BoardChunk], AlignmentReport, List[AlignedWord]]:
+    ) -> Tuple[List[BoardChunk], AlignmentReport, List[AlignedWord], List[Dict]]:
         """
         Aligns book chunks with whisper word timestamps.
         Returns updated chunks with start_time and end_time, plus intro/outro boards if present.
@@ -52,6 +129,9 @@ class SequenceAligner:
         To one są właściwym wynikiem dopasowania — plansze da się z nich odtworzyć
         w dowolnym podziale, bez powtarzania transkrypcji. Bez tej listy każda zmiana
         granicy wymagałaby przeliczenia całego rozdziału od nowa.
+
+        Czwarty element to wstawki — fragmenty nagrania bez odpowiednika w pliku .txt,
+        wraz z kotwicą w numeracji słów rozdziału i własnymi czasami słów.
         """
         # 1. Flatten all book words from chunks
         book_words_map: List[Tuple[int, int, str]] = []  # (chunk_idx, word_idx_in_chunk, word_text)
@@ -218,6 +298,19 @@ class SequenceAligner:
             ).strip()
             return said + "\n" + intro_outro_placeholder if said else intro_outro_placeholder
 
+        # ------------------------------------------------------------------
+        # Wstawki: mowa z nagrania, która nie ma odpowiednika w pliku .txt.
+        #
+        # Wszystko, czego potrzeba, jest już policzone — matched_whisper_indices mówi,
+        # które słowa Whispera trafiły w tekst książki. Nieprzerwane ciągi tych, które
+        # nie trafiły, to albo wstęp i stopka lektora, albo akapit brakujący w źródle.
+        # Do tej pory brane pod uwagę były wyłącznie ciągi na brzegach, więc brakujący
+        # akapit w środku rozdziału rozjeżdżał czasy wszystkich sąsiednich plansz.
+        # ------------------------------------------------------------------
+        extras = self._find_extras(
+            whisper_words, matched_whisper_indices, len(book_words_map), intro_outro_placeholder
+        )
+
         # Check for Intro (speech before first matched book word)
         first_w_idx = min(matched_whisper_indices.keys()) if matched_whisper_indices else 0
         intro_detected = False
@@ -312,4 +405,4 @@ class SequenceAligner:
                 "— plansz nie da się z nich odtworzyć."
             )
 
-        return final_chunks, report, word_times
+        return final_chunks, report, word_times, extras

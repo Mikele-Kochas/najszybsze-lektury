@@ -7,6 +7,12 @@ Tu spinają się trzy wcześniejsze warstwy:
     chapter_*.json     — czasy pojedynczych słów z alignmentu
     audio_analysis.py  — gdzie w nagraniu jest cisza
 
+Rozdział jest ciągiem **jednostek**. Jednostka to plansza tekstu z książki albo
+plansza wstawki — fragmentu, który słychać w nagraniu, ale którego nie ma w pliku
+.txt (wstęp lektora, stopka, brakujący akapit). Obie mają to samo: tekst i czasy
+swoich słów. Dzięki temu wstawka nie jest wyjątkiem doklejanym na końcu, tylko
+zwykłą planszą — da się ją pociąć i dostać dla niej cięcia tą samą drogą.
+
 Każda granica dostaje jeden punkt cięcia i komplet danych, na podstawie których
 człowiek może ocenić, czy mu ufa: skąd czas pochodzi, ile ciszy zostaje po obu
 stronach i czy lektor w ogóle zrobił tam przerwę. Plansze przylegają do siebie —
@@ -25,20 +31,23 @@ Kolejność pierwszeństwa przy ustalaniu czasu cięcia:
 from __future__ import annotations
 
 import os
+import re
 import sys
 import json
-import glob
+import difflib
 import argparse
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from .text_parser import Chapter, estimate_line_count
+from .aligner import normalize_word
 from .layout import (
     Layout, LayoutError, LayoutStore, Token,
     tokenize_chapter, render_text, word_times_from_payload, load_chapters,
+    book_cut_key, insert_cut_key, correction_key, insert_state,
 )
 from .audio_analysis import (
-    AudioAnalysis, Envelope, Silence, analyze_audio, resolve_audio_path,
+    AudioAnalysis, analyze_audio, resolve_audio_path,
     snap_boundary, snap_head, snap_tail, cut_safety,
     DEFAULT_SEARCH_WINDOW, DEFAULT_MIN_SILENCE, DEFAULT_HEAD_PAD, DEFAULT_TAIL_PAD,
     SAFE_MARGIN,
@@ -46,28 +55,239 @@ from .audio_analysis import (
 
 # Wtrącenie lektora dostaje tekst, który faktycznie słychać w nagraniu, plus znacznik
 # mówiący, że w pliku .txt tego fragmentu nie ma. Sam znacznik zamiast treści zmuszał
-# do odsłuchiwania każdej takiej planszy, żeby w ogóle wiedzieć, co się w niej dzieje —
-# a nazwa wyeksportowanego MP3 brzmiała „001 - (brak tekstu…)”.
+# do odsłuchiwania każdej takiej planszy, żeby w ogóle wiedzieć, co się w niej dzieje.
 NO_SOURCE_MARKER = "(brak tekstu w pliku txt)"
 MIN_BOARD_SECONDS = 0.20
+END_CUT_KEY = "end"
 
+
+# ---------------------------------------------------------------------------
+# Wstawki: tekst i czasy słów
+# ---------------------------------------------------------------------------
+
+def heard_text(segments: Sequence[Dict[str, Any]], start: float, end: float) -> str:
+    """Tekst usłyszany przez Whispera w podanym przedziale, sklejony w jedną całość."""
+    parts = []
+    for seg in segments:
+        if float(seg["end"]) > start + 0.1 and float(seg["start"]) < end - 0.1:
+            text = str(seg.get("text", "")).strip()
+            if text:
+                parts.append(text)
+    return " ".join(parts).strip()
+
+
+def extra_board_text(heard: str) -> str:
+    """Treść planszy wtrącenia: to, co słychać, plus znacznik braku w pliku źródłowym."""
+    return heard + "\n" + NO_SOURCE_MARKER if heard else NO_SOURCE_MARKER
+
+
+def strip_marker(text: str) -> str:
+    """Tekst wstawki bez znacznika — do liczenia słów i dopasowania do nagrania."""
+    return re.sub(r"\(brak tekstu[^)]*\)", "", text or "").strip()
+
+
+def align_free_text(
+    words: Sequence[str],
+    whisper_words: Sequence[Dict[str, Any]],
+    start: float,
+    end: float,
+) -> List[Tuple[float, float]]:
+    """
+    Czasy słów tekstu wpisanego ręcznie, przez dopasowanie do słów Whispera.
+
+    Użytkownik przepisuje wstawkę ze słuchu i prawie nigdy nie trafi w to samo
+    brzmienie co Whisper — przepisze poprawnie to, co model przekręcił, doda
+    interpunkcję, rozwinie skrót. Dlatego dopasowujemy sekwencje, a słowa bez pary
+    dostają czasy z interpolacji między najbliższymi trafieniami. To ta sama zasada,
+    która działa dla tekstu książki, tylko na krótszym odcinku.
+    """
+    if not words:
+        return []
+    if not whisper_words:
+        step = (end - start) / len(words)
+        return [(round(start + i * step, 3), round(start + (i + 1) * step, 3))
+                for i in range(len(words))]
+
+    user_norm = [normalize_word(w) for w in words]
+    heard_norm = [normalize_word(str(w.get("w", ""))) for w in whisper_words]
+
+    times: List[Optional[Tuple[float, float]]] = [None] * len(words)
+    matcher = difflib.SequenceMatcher(None, heard_norm, user_norm, autojunk=False)
+    for h_start, u_start, length in matcher.get_matching_blocks():
+        for k in range(length):
+            h, u = h_start + k, u_start + k
+            if h < len(whisper_words) and u < len(words):
+                times[u] = (float(whisper_words[h]["s"]), float(whisper_words[h]["e"]))
+
+    return _interpolate(times, start, end)
+
+
+def _interpolate(times: List[Optional[Tuple[float, float]]],
+                 start: float, end: float) -> List[Tuple[float, float]]:
+    """Uzupełnia luki między dopasowanymi słowami, rozkładając je równomiernie."""
+    n = len(times)
+    anchors = [i for i, t in enumerate(times) if t is not None]
+    if not anchors:
+        step = (end - start) / n
+        return [(round(start + i * step, 3), round(start + (i + 1) * step, 3)) for i in range(n)]
+
+    def fill(lo: int, hi: int, t0: float, t1: float) -> None:
+        count = hi - lo
+        if count <= 0:
+            return
+        step = max(0.02, (t1 - t0) / (count + 1))
+        for k in range(count):
+            a = t0 + k * step
+            times[lo + k] = (round(a, 3), round(a + step, 3))
+
+    fill(0, anchors[0], start, times[anchors[0]][0])
+    for a, b in zip(anchors, anchors[1:]):
+        fill(a + 1, b, times[a][1], times[b][0])
+    fill(anchors[-1] + 1, n, times[anchors[-1]][1], end)
+
+    return [t if t is not None else (start, end) for t in times]
+
+
+# ---------------------------------------------------------------------------
+# Jednostki rozdziału
+# ---------------------------------------------------------------------------
+
+@dataclass
+class Unit:
+    """Jedna plansza: tekst z książki albo plansza wstawki."""
+    key: str                                   # identyfikator cięcia otwierającego
+    kind: str                                  # 'book' | 'insert'
+    text: str
+    times: List[Tuple[float, float]]
+    dialogue: bool = False
+    token_start: int = -1                      # tylko dla 'book'
+    token_end: int = -1
+    anchor: int = -1                           # tylko dla 'insert'
+    board: int = -1
+    edited: bool = False
+    corrected: bool = False
+
+
+def _extras_by_anchor(extras: Sequence[Dict[str, Any]]) -> Dict[int, Dict[str, Any]]:
+    return {int(e.get("anchor", 0)): e for e in extras or []}
+
+
+def _insert_units(
+    layout: Layout,
+    extra: Dict[str, Any],
+    segments: Sequence[Dict[str, Any]] = (),
+) -> List[Unit]:
+    """
+    Plansze jednej wstawki wraz z czasami jej słów.
+
+    Wyniki przetworzone przed wprowadzeniem wstawek niosą sam zakres czasu, bez tekstu
+    ani słów Whispera. Zamiast pokazywać wtedy pustą planszę, odczytujemy treść
+    z transkrypcji rozdziału — czasy wychodzą z rozłożenia równomiernego, więc
+    ponowne przetworzenie rozdziału nadal je poprawi.
+    """
+    anchor = int(extra.get("anchor", 0))
+    state = insert_state(layout, anchor)
+    start, end = float(extra["start_time"]), float(extra["end_time"])
+
+    fallback = extra.get("heard") or heard_text(segments, start, end)
+    raw = state.get("text") if state.get("edited") else extra.get("text")
+    text = raw if raw is not None else extra_board_text(fallback)
+    if not strip_marker(text) and fallback:
+        text = extra_board_text(fallback)
+
+    body = strip_marker(text)
+    words = body.split()
+
+    if not words:
+        # Nic nie wpisano i nic nie słychać — zostaje sam znacznik na całym odcinku.
+        return [Unit(key=insert_cut_key(anchor, 0), kind="insert", text=text,
+                     times=[(start, end)], anchor=anchor, board=0,
+                     edited=bool(state.get("edited")))]
+
+    times = align_free_text(words, extra.get("words") or [], start, end)
+    breaks = [b for b in (state.get("breaks") or []) if 0 < b < len(words)]
+    bounds = [0] + sorted(set(breaks)) + [len(words)]
+
+    units: List[Unit] = []
+    for i in range(len(bounds) - 1):
+        lo, hi = bounds[i], bounds[i + 1]
+        piece = " ".join(words[lo:hi])
+        # Znacznik trafia tylko na ostatnią planszę wstawki, żeby nie powtarzał się
+        # przy każdym kawałku długiego wpisanego fragmentu.
+        if i == len(bounds) - 2:
+            piece = piece + "\n" + NO_SOURCE_MARKER
+        units.append(Unit(
+            key=insert_cut_key(anchor, i), kind="insert", text=piece,
+            times=times[lo:hi], anchor=anchor, board=i,
+            edited=bool(state.get("edited")),
+        ))
+    return units
+
+
+def build_units(
+    layout: Layout,
+    tokens: Sequence[Token],
+    word_times: Sequence[Tuple[float, float]],
+    extras: Sequence[Dict[str, Any]] = (),
+    segments: Sequence[Dict[str, Any]] = (),
+) -> List[Unit]:
+    """
+    Cały rozdział jako uporządkowany ciąg plansz.
+
+    Wstawka o kotwicy N wchodzi tuż przed planszę zaczynającą się słowem N; kotwica
+    równa liczbie słów rozdziału stawia ją na końcu. Kolejność wynika z kotwic,
+    więc brakujący akapit w środku rozdziału trafia na swoje miejsce sam.
+    """
+    if layout.token_count != len(word_times):
+        raise LayoutError(
+            f"Podział opisuje {layout.token_count} słów, a czasów jest {len(word_times)}."
+        )
+
+    by_anchor = _extras_by_anchor(extras)
+    bounds = layout.bounds()
+    units: List[Unit] = []
+
+    for i in range(len(bounds) - 1):
+        lo, hi = bounds[i], bounds[i + 1]
+        for anchor in sorted(a for a in by_anchor if lo <= a < hi and a == lo):
+            units.extend(_insert_units(layout, by_anchor[anchor], segments))
+
+        original = render_text(tokens, lo, hi)
+        fix = layout.corrections.get(correction_key(lo, hi))
+        units.append(Unit(
+            key=book_cut_key(lo), kind="book",
+            text=fix if fix else original,
+            times=list(word_times[lo:hi]),
+            dialogue=hi > lo and all(tokens[k].is_dialogue for k in range(lo, hi)),
+            token_start=lo, token_end=hi, corrected=bool(fix),
+        ))
+
+    for anchor in sorted(a for a in by_anchor if a >= layout.token_count):
+        units.extend(_insert_units(layout, by_anchor[anchor], segments))
+
+    return units
+
+
+# ---------------------------------------------------------------------------
+# Cięcia
+# ---------------------------------------------------------------------------
 
 @dataclass
 class Cut:
     """Jeden punkt cięcia wraz z tym, co pozwala ocenić jego wiarygodność."""
-    index: int              # 0 = początek rozdziału, ostatni = koniec
-    token: int              # indeks tokenu, na którym stoi granica
+    index: int
+    key: str                # identyfikator granicy; END_CUT_KEY zamyka rozdział
     time: float
     source: str             # 'manual' | 'silence' | 'words' | 'edge'
     confidence: float = 0.0
-    safety: float = 0.0     # ile ciszy zostaje po obu stronach cięcia
+    safety: float = 0.0
     silence_start: float = 0.0
     silence_end: float = 0.0
-    word_end: float = 0.0   # koniec ostatniego słowa przed granicą
-    word_start: float = 0.0 # początek pierwszego słowa po granicy
-    no_pause: bool = False  # lektor czyta przez tę granicę bez przerwy
-    segment_text: str = ""  # wypowiedź Whispera, przez którą przechodzi granica
-    clamped: bool = False   # czas trzeba było skorygować, by zachować kolejność
+    word_end: float = 0.0
+    word_start: float = 0.0
+    no_pause: bool = False
+    segment_text: str = ""
+    clamped: bool = False
 
     @property
     def needs_attention(self) -> bool:
@@ -76,7 +296,7 @@ class Cut:
 
     def to_dict(self) -> Dict[str, Any]:
         return {
-            "index": self.index, "token": self.token, "time": round(self.time, 3),
+            "index": self.index, "key": self.key, "time": round(self.time, 3),
             "source": self.source, "confidence": round(self.confidence, 3),
             "safety": round(self.safety, 3),
             "silence_start": round(self.silence_start, 3),
@@ -97,7 +317,7 @@ def _segment_at(segments: Sequence[Dict[str, Any]], t: float, margin: float = 0.
 
 def compute_cuts(
     layout: Layout,
-    word_times: Sequence[Tuple[float, float]],
+    units: Sequence[Unit],
     analysis: AudioAnalysis,
     segments: Sequence[Dict[str, Any]] = (),
     search: float = DEFAULT_SEARCH_WINDOW,
@@ -107,52 +327,45 @@ def compute_cuts(
     tail_pad: float = DEFAULT_TAIL_PAD,
 ) -> List[Cut]:
     """
-    Wyznacza punkty cięcia dla wszystkich granic podziału, wraz z brzegami rozdziału.
+    Punkty cięcia między kolejnymi planszami, wraz z brzegami rozdziału.
 
-    Zwraca len(breaks) + 2 pozycji: początek rozdziału, każda granica, koniec rozdziału.
+    Zwraca len(units) + 1 pozycji: początek, każda granica, koniec.
     """
-    if layout.token_count != len(word_times):
-        raise LayoutError(
-            f"Podział opisuje {layout.token_count} słów, a czasów jest {len(word_times)}."
-        )
-    if not word_times:
+    if not units:
         return []
 
     env = analysis.envelope
-    bounds = layout.bounds()
     cuts: List[Cut] = []
 
-    for i, token in enumerate(bounds):
-        first = i == 0
-        last = i == len(bounds) - 1
-        word_end = word_times[token - 1][1] if token > 0 else 0.0
-        word_start = word_times[token][0] if token < len(word_times) else env.duration
+    for i in range(len(units) + 1):
+        first, last = i == 0, i == len(units)
+        key = units[i].key if not last else END_CUT_KEY
+        word_end = units[i - 1].times[-1][1] if i > 0 and units[i - 1].times else 0.0
+        word_start = units[i].times[0][0] if not last and units[i].times else env.duration
 
-        if token in layout.overrides:
-            time = float(layout.overrides[token])
-            cut = Cut(index=i, token=token, time=time, source="manual", confidence=1.0,
+        if key in layout.overrides:
+            time = float(layout.overrides[key])
+            cut = Cut(index=i, key=key, time=time, source="manual", confidence=1.0,
                       safety=cut_safety(env, time), word_end=word_end, word_start=word_start)
         elif first:
             time = snap_head(env, word_start, head_pad)
-            cut = Cut(index=i, token=token, time=time, source="edge",
-                      confidence=1.0, safety=cut_safety(env, time),
-                      word_end=0.0, word_start=word_start)
+            cut = Cut(index=i, key=key, time=time, source="edge", confidence=1.0,
+                      safety=cut_safety(env, time), word_start=word_start)
         elif last:
             time = snap_tail(env, word_end, tail_pad)
-            cut = Cut(index=i, token=token, time=time, source="edge",
-                      confidence=1.0, safety=cut_safety(env, time),
-                      word_end=word_end, word_start=env.duration)
+            cut = Cut(index=i, key=key, time=time, source="edge", confidence=1.0,
+                      safety=cut_safety(env, time), word_end=word_end,
+                      word_start=env.duration)
         else:
             snap = snap_boundary(env, word_end, word_start, analysis.silences,
                                  search=search, min_silence=min_silence, bias=bias, index=i)
             cut = Cut(
-                index=i, token=token, time=snap.cut,
+                index=i, key=key, time=snap.cut,
                 source="silence" if snap.method == "silence" else "words",
                 confidence=snap.confidence, safety=snap.safety_after,
                 silence_start=snap.silence_start, silence_end=snap.silence_end,
                 word_end=word_end, word_start=word_start,
             )
-
         cuts.append(cut)
 
     _enforce_order(cuts, env.duration)
@@ -186,96 +399,34 @@ def _enforce_order(cuts: List[Cut], duration: float) -> None:
             cuts[i].clamped = True
 
 
-def boards_from_cuts(
-    layout: Layout,
-    tokens: Sequence[Token],
+def boards_from_units(
+    units: Sequence[Unit],
     cuts: Sequence[Cut],
     max_chars_per_line: int = 45,
 ) -> List[Dict[str, Any]]:
-    """Plansze z tekstem i czasami — format przyjmowany przez exporter."""
-    bounds = layout.bounds()
+    """Plansze w formacie przyjmowanym przez exporter."""
     boards: List[Dict[str, Any]] = []
-
-    for i in range(len(bounds) - 1):
-        lo, hi = bounds[i], bounds[i + 1]
-        text = render_text(tokens, lo, hi)
-        dialogue = hi > lo and all(tokens[k].is_dialogue for k in range(lo, hi))
+    for i, unit in enumerate(units):
         start, end = cuts[i].time, cuts[i + 1].time
         boards.append({
             "chunk_id": i + 1,
-            "text": text,
-            "chunk_type": "dialogue" if dialogue else "narration",
-            "lines_count": estimate_line_count(text, max_chars_per_line),
+            "text": unit.text,
+            "chunk_type": ("intro_outro" if unit.kind == "insert"
+                           else ("dialogue" if unit.dialogue else "narration")),
+            "lines_count": estimate_line_count(unit.text, max_chars_per_line),
             "start_time": round(start, 3),
             "end_time": round(end, 3),
             "duration": round(end - start, 3),
-            "token_start": lo,
-            "token_end": hi,
+            "cut_key": unit.key,
+            "kind": unit.kind,
+            "token_start": unit.token_start,
+            "token_end": unit.token_end,
+            "anchor": unit.anchor,
+            "insert_board": unit.board,
+            "edited": unit.edited,
+            "corrected": unit.corrected,
         })
     return boards
-
-
-def assemble_chapter(
-    payload: Dict[str, Any],
-    boards: List[Dict[str, Any]],
-    cuts: Sequence[Cut],
-) -> List[Dict[str, Any]]:
-    """
-    Dokłada wtrącenia lektora przed pierwszą i po ostatniej planszy.
-
-    Bez tego wstęp czytany przez lektora zniknąłby z paczki — nie ma go w tekście
-    książki, więc nie ma go też w podziale.
-    """
-    extras = payload.get("extras") or []
-    segments = payload.get("whisper_segments") or []
-    intro = next((e for e in extras if e.get("position") == "intro"), None)
-    outro = next((e for e in extras if e.get("position") == "outro"), None)
-    out: List[Dict[str, Any]] = []
-
-    if intro and cuts:
-        start, end = float(intro["start_time"]), min(float(intro["end_time"]), cuts[0].time)
-        if end - start >= MIN_BOARD_SECONDS:
-            out.append(_placeholder_board(start, end, heard_text(segments, start, end)))
-
-    out.extend(boards)
-
-    if outro and cuts:
-        start, end = max(float(outro["start_time"]), cuts[-1].time), float(outro["end_time"])
-        if end - start >= MIN_BOARD_SECONDS:
-            out.append(_placeholder_board(start, end, heard_text(segments, start, end)))
-
-    for idx, board in enumerate(out, 1):
-        board["chunk_id"] = idx
-    return out
-
-
-def heard_text(segments: Sequence[Dict[str, Any]], start: float, end: float) -> str:
-    """Tekst usłyszany przez Whispera w podanym przedziale, sklejony w jedną całość."""
-    parts = []
-    for seg in segments:
-        if float(seg["end"]) > start + 0.1 and float(seg["start"]) < end - 0.1:
-            text = str(seg.get("text", "")).strip()
-            if text:
-                parts.append(text)
-    return " ".join(parts).strip()
-
-
-def extra_board_text(heard: str) -> str:
-    """Treść planszy wtrącenia: to, co słychać, plus znacznik braku w pliku źródłowym."""
-    return heard + "\n" + NO_SOURCE_MARKER if heard else NO_SOURCE_MARKER
-
-
-def _placeholder_board(start: float, end: float, heard: str = "") -> Dict[str, Any]:
-    text = extra_board_text(heard)
-    return {
-        "chunk_id": 0,
-        "text": text,
-        "chunk_type": "intro_outro",
-        "lines_count": estimate_line_count(text, 45),
-        "start_time": round(start, 3),
-        "end_time": round(end, 3),
-        "duration": round(end - start, 3),
-    }
 
 
 def compute_chapter_timing(
@@ -288,30 +439,34 @@ def compute_chapter_timing(
     max_chars_per_line: int = 45,
     **snap_kwargs: Any,
 ) -> Dict[str, Any]:
-    """Pełny wynik dla jednego rozdziału: cięcia, plansze i podsumowanie jakości."""
+    """Pełny wynik dla jednego rozdziału: jednostki, cięcia, plansze i podsumowanie."""
     from .layout import propose_layout
 
     tokens = tokenize_chapter(chapter) if tokens is None else tokens
     layout = layout or propose_layout(chapter, tokens, max_lines, max_chars_per_line)
     word_times = word_times_from_payload(payload)
+    extras = payload.get("extras") or []
 
-    cuts = compute_cuts(layout, word_times, analysis,
-                        payload.get("whisper_segments", []), **snap_kwargs)
-    boards = boards_from_cuts(layout, tokens, cuts, max_chars_per_line)
-    full = assemble_chapter(payload, boards, cuts)
+    units = build_units(layout, tokens, word_times, extras,
+                        payload.get('whisper_segments', []))
+    cuts = compute_cuts(layout, units, analysis, payload.get("whisper_segments", []), **snap_kwargs)
+    boards = boards_from_units(units, cuts, max_chars_per_line)
 
-    interior = [c for c in cuts if c.source not in ("edge",)] or cuts
     return {
         "chapter_num": chapter.number,
         "header": chapter.header,
         "audio_file": payload.get("audio_file"),
         "duration": analysis.envelope.duration,
+        "units": units,
         "cuts": cuts,
         "boards": boards,
-        "chunks": full,
+        "chunks": boards,
         "summary": {
             "boards": len(boards),
             "cuts": len(cuts),
+            "inserts": sum(1 for u in units if u.kind == "insert"),
+            "inserts_edited": sum(1 for u in units if u.kind == "insert" and u.edited),
+            "corrections": sum(1 for u in units if u.corrected),
             "attention": sum(1 for c in cuts if c.needs_attention),
             "no_pause": sum(1 for c in cuts if c.no_pause),
             "from_silence": sum(1 for c in cuts if c.source == "silence"),
@@ -328,8 +483,7 @@ def compute_chapter_timing(
 # ---------------------------------------------------------------------------
 
 def _print_table(result: Dict[str, Any]) -> None:
-    print(f"  {'granica':>8} {'czas':>8} {'źródło':>8} {'pewn.':>6} {'zapas':>7} "
-          f"{'słowo→':>8} {'→słowo':>8}  uwagi")
+    print(f"  {'granica':>10} {'czas':>8} {'źródło':>8} {'pewn.':>6} {'zapas':>7}  uwagi")
     for c in result["cuts"]:
         marks = []
         if c.no_pause:
@@ -340,9 +494,8 @@ def _print_table(result: Dict[str, Any]) -> None:
             marks.append("bez ciszy")
         elif c.safety < SAFE_MARGIN and c.source != "edge":
             marks.append("mały zapas")
-        print(f"  {c.index:>8} {c.time:8.2f} {c.source:>8} {c.confidence:6.2f} "
-              f"{c.safety * 1000:6.0f}ms {c.word_end:8.2f} {c.word_start:8.2f}  "
-              f"{', '.join(marks)}")
+        print(f"  {c.key:>10} {c.time:8.2f} {c.source:>8} {c.confidence:6.2f} "
+              f"{c.safety * 1000:6.0f}ms  {', '.join(marks)}")
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -350,7 +503,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
     base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    parser = argparse.ArgumentParser(description="Wyznaczanie timestampów z zatwierdzonego podziału (etap 5).")
+    parser = argparse.ArgumentParser(description="Wyznaczanie timestampów z zatwierdzonego podziału.")
     parser.add_argument("--chapter", type=int, action="append")
     parser.add_argument("--all", action="store_true")
     parser.add_argument("--data-dir", default=os.path.join(base, "Data"))
@@ -372,8 +525,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     cache_dir = os.path.join(args.data_dir, "Cache_Audio_Analysis")
     store = LayoutStore(args.data_dir)
 
-    totals = {"boards": 0, "cuts": 0, "attention": 0, "no_pause": 0,
-              "from_silence": 0, "from_words": 0, "manual": 0, "clamped": 0, "over_limit": 0}
+    totals = {k: 0 for k in ("boards", "cuts", "inserts", "inserts_edited", "corrections",
+                             "attention", "no_pause", "from_silence", "from_words",
+                             "manual", "clamped", "over_limit")}
     dump: List[Dict[str, Any]] = []
 
     for chapter in chapters:
@@ -405,7 +559,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
         if not args.quiet:
             print(f"\nRozdział {chapter.number}: {chapter.header}  "
-                  f"({s['boards']} plansz, {s['cuts']} cięć, {s['attention']} do obejrzenia)")
+                  f"({s['boards']} plansz, {s['inserts']} wstawek, {s['attention']} do obejrzenia)")
             _print_table(result)
 
         dump.append({
@@ -418,6 +572,9 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     print("\n" + "=" * 74)
     print(f"TIMESTAMPY — {len(dump)} rozdz., {totals['boards']} plansz, {totals['cuts']} cięć")
+    print(f"  wstawek (brak w .txt):     {totals['inserts']}  "
+          f"(wpisanych ręcznie: {totals['inserts_edited']})")
+    print(f"  poprawionych tekstów:      {totals['corrections']}")
     print(f"  z ciszy w nagraniu:        {totals['from_silence']}")
     print(f"  ze środka luki (bez ciszy):{totals['from_words']:>4}")
     print(f"  ustawionych ręcznie:       {totals['manual']}")

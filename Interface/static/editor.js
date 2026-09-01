@@ -9,10 +9,10 @@
 
 const ED = {
   overview: [],
-  bnd: { ch: null, data: null, drag: null },
+  bnd: { ch: null, data: null, drag: null, busy: false },
   cut: {
     ch: null, data: null, peaks: null, audio: null,
-    sel: 1, win: 4, onlyAtt: false, times: [], playing: false, stopAt: null,
+    sel: 1, win: 4, onlyAtt: false, times: [], playing: false, stopAt: null, busy: false,
   },
 };
 
@@ -56,13 +56,23 @@ async function edLoadOverview() {
   const res = await api('/api/layout/overview');
   ED.overview = res.chapters || [];
   const ready = ED.overview.filter(c => c.processed);
+
+  // Granice da się ustawiać bez nagrania — podział zależy wyłącznie od tekstu.
+  // Ekran cięć potrzebuje już czasów słów, więc tam zostają same przetworzone.
+  const lists = { bnd: ED.overview, cut: ready };
   for (const [selId, key] of [['bndChapter', 'bnd'], ['cutChapter', 'cut']]) {
     const sel = $(selId);
+    const list = lists[key];
     const keep = ED[key].ch;
-    sel.innerHTML = ready.map(c =>
-      `<option value="${c.chapter_num}">Rozdział ${String(c.chapter_num).padStart(2, '0')} — ${edEsc(c.title || c.header)}${c.attention ? ` · ${c.attention} spornych` : ''}</option>`
-    ).join('');
-    if (keep && ready.some(c => c.chapter_num === keep)) sel.value = String(keep);
+    sel.innerHTML = list.map(c => {
+      const marks = [];
+      if (!c.processed) marks.push('nieprzetworzony');
+      if (c.attention) marks.push(`${c.attention} spornych`);
+      if (c.archived_layouts) marks.push(`${c.archived_layouts} odłożonych`);
+      return `<option value="${c.chapter_num}">Rozdział ${String(c.chapter_num).padStart(2, '0')}` +
+        ` — ${edEsc(c.title || c.header)}${marks.length ? ` · ${marks.join(' · ')}` : ''}</option>`;
+    }).join('');
+    if (keep && list.some(c => c.chapter_num === keep)) sel.value = String(keep);
   }
   return ready;
 }
@@ -102,25 +112,39 @@ function edRenderBoundaries() {
   const frag = document.createDocumentFragment();
   let over = 0, maxLines = 0;
 
+  const inserts = d.inserts || [];
+  const insertAt = a => inserts.filter(x => x.anchor === a);
+
+  // Wspólny licznik plansz — ta sama numeracja co w studiu i w paczce.
+  let no = 1;
+
   for (let b = 0; b < bs.length - 1; b++) {
     const lo = bs[b], hi = bs[b + 1];
+    insertAt(lo).forEach(ins => {
+      frag.appendChild(edInsertBlock(ins, no));
+      no += edInsertBoardCount(ins);
+    });
     const text = edBoardText(d, lo, hi);
     const lines = edLineCount(text, d.max_chars);
     if (lines > maxLines) maxLines = lines;
     if (lines > d.max_lines) over++;
 
     const board = document.createElement('div');
-    board.className = 'bnd-board';
+    board.className = 'bnd-board' + (d.corrections && d.corrections[lo + '-' + hi] ? ' fixed' : '');
+    board.dataset.range = lo + '-' + hi;
     const gut = document.createElement('div');
     gut.className = 'bnd-gutter';
     gut.innerHTML =
-      `<span class="no">${String(b + 1).padStart(2, '0')}</span>` +
+      `<span class="no">${String(no++).padStart(2, '0')}</span>` +
       `<span class="li${lines > d.max_lines ? ' over' : ''}">${lines} lin</span>` +
       `<span class="kind">${edIsDialogue(text) ? 'dialog' : 'narracja'}</span>` +
       (hi - lo >= 2
         ? `<button class="bnd-add" data-board="${b}" data-mid="${lo + Math.floor((hi - lo) / 2)}"` +
           ` title="Wstaw nowy podział w środku tej planszy — potem przeciągnij go, gdzie chcesz">✚ podział</button>`
-        : '');
+        : '') +
+      `<button class="bnd-fix" data-fix="${lo}-${hi}"` +
+      ` title="Popraw tekst tej planszy — czasy i podział zostają bez zmian">` +
+      `${d.corrections && d.corrections[lo + '-' + hi] ? '✎ poprawiony' : '✎ popraw'}</button>`;
     board.appendChild(gut);
 
     const t = document.createElement('div');
@@ -144,20 +168,34 @@ function edRenderBoundaries() {
     if (b < bs.length - 2) frag.appendChild(edBreakRow(d, b, bs[b + 1]));
   }
 
+  inserts.filter(x => x.anchor >= d.token_count).forEach(ins => {
+    frag.appendChild(edInsertBlock(ins, no));
+    no += edInsertBoardCount(ins);
+  });
+
   doc.textContent = '';
   doc.appendChild(frag);
 
-  const flagged = d.breaks.filter(t => d.flags[String(t)]).length;
+  const flagged = d.breaks.filter(t => d.flags['b' + t]).length;
+  const stale = (d.stale_corrections || []).length;
   $('bndStats').innerHTML =
     `<div class="ed-stat"><b>${bs.length - 1}</b><span>plansz</span></div>` +
     `<div class="ed-stat ${flagged ? 'warn' : ''}"><b>${flagged}</b><span>bez pauzy</span></div>` +
-    `<div class="ed-stat ${over ? 'warn' : ''}"><b>${maxLines}/${d.max_lines}</b><span>najdłuższa</span></div>`;
-  $('bndMeta').textContent =
-    `${d.token_count} słów · podział ${d.saved ? 'zapisany' : 'z automatu'}`;
+    `<div class="ed-stat ${over ? 'warn' : ''}"><b>${maxLines}/${d.max_lines}</b><span>najdłuższa</span></div>` +
+    (stale ? `<div class="ed-stat warn"><b>${stale}</b><span>korekt bez planszy</span></div>` : '');
+
+  const notes = [`${d.token_count} słów`,
+                 `podział ${d.saved ? 'zapisany' : 'z automatu'}`];
+  if (!d.processed) notes.push('rozdział nieprzetworzony — bez wstawek i czasów');
+  if ((d.archived_layouts || []).length) {
+    notes.push(`${d.archived_layouts.length} odłożonych podziałów w Data/Layouts/Niezgodne`);
+  }
+  if (stale) notes.push(`${stale} korekt straciło swoją planszę`);
+  $('bndMeta').textContent = notes.join(' · ');
 }
 
 function edBreakRow(d, idx, tokenIndex) {
-  const flag = d.flags[String(tokenIndex)];
+  const flag = d.flags['b' + tokenIndex];
   const row = document.createElement('div');
   row.className = 'bnd-brk' + (flag ? ' flag' : '');
   row.dataset.brk = idx;
@@ -186,7 +224,138 @@ function edBreakRow(d, idx, tokenIndex) {
   return row;
 }
 
+/* Numeracja plansz musi być ta sama, co w studiu weryfikacji i w paczce: liczy
+   wszystkie plansze po kolei, razem z planszami wstawek. Osobne liczniki sprawiały,
+   że „Plansza 03" na tym ekranie i „Plansza #3" w studiu wskazywały co innego. */
+function edInsertBoardCount(ins) {
+  return (ins.breaks || []).length + 1;
+}
+
+function edInsertBlock(ins, firstNo) {
+  const box = document.createElement('div');
+  box.className = 'bnd-insert' + (ins.edited ? ' edited' : '');
+  box.dataset.anchor = ins.anchor;
+
+  const where = ins.position === 'intro' ? 'przed rozdziałem'
+    : ins.position === 'outro' ? 'po rozdziale' : 'w środku rozdziału';
+  const words = ins.text.split(/\s+/).filter(Boolean);
+  const total = Math.max(1, words.length || ins.word_count);
+  const bounds = [0].concat(ins.breaks, [total]);
+  const count = bounds.length - 1;
+
+  // Tekst wstawki składamy słowo po słowie, z klikalną szczeliną między nimi —
+  // tak samo jak tekst książki. Wcześniej „podziel" tnie zawsze w połowie planszy,
+  // więc trafienie w konkretne słowo było niewykonalne.
+  const body = (lo, hi) => {
+    let html = '';
+    for (let i = lo; i < hi; i++) {
+      html += `<span>${edEsc(words[i] || '')}</span>`;
+      if (i + 1 < hi) html += `<span class="bnd-ins-gap" data-word="${i + 1}"` +
+        ` title="Podziel planszę wstawki w tym miejscu"></span>`;
+    }
+    return html || '<i>pusto</i>';
+  };
+
+  let html =
+    `<div class="bnd-ins-head">` +
+      `<span class="bnd-ins-tag">brak w pliku txt · ${where}</span>` +
+      `<span class="bnd-ins-time">${edFmt(ins.start_time)} – ${edFmt(ins.end_time)}</span>` +
+      `<span class="bnd-ins-meta">${ins.word_count} słów · ${count} plansz` +
+        `${ins.edited ? ' · wpisane ręcznie' : ' · tekst z nagrania'}</span>` +
+      `<button class="bnd-ins-btn" data-ins="edit">✎ popraw tekst</button>` +
+    `</div>`;
+
+  for (let i = 0; i < count; i++) {
+    const lo = bounds[i], hi = bounds[i + 1];
+    html +=
+      `<div class="bnd-ins-part">` +
+        `<span class="bnd-ins-no">${firstNo != null ? String(firstNo + i).padStart(2, '0') : i + 1}` +
+          `<small>${i + 1}/${count}</small></span>` +
+        `<p class="bnd-ins-text">${body(lo, hi)}</p>` +
+        `<span class="bnd-ins-acts">` +
+          (hi - lo >= 2
+            ? `<button class="bnd-ins-btn" data-ins="split" data-board="${i}"` +
+              ` data-word="${lo + Math.floor((hi - lo) / 2)}">✚ podziel</button>` : '') +
+          (i < count - 1
+            ? `<button class="bnd-ins-btn" data-ins="merge" data-board="${i}">✕ scal</button>` : '') +
+        `</span>` +
+      `</div>`;
+
+    // Granica między planszami wstawki — przesuwana o słowo w każdą stronę,
+    // dokładnie jak granica w tekście książki.
+    if (i < count - 1) {
+      const b = bounds[i + 1];
+      const canPrev = b - 1 > bounds[i];
+      const canNext = b + 1 < bounds[i + 2];
+      html +=
+        `<div class="bnd-ins-brk" data-brk="${i}">` +
+          `<button class="bnd-ins-btn" data-ins="prev" data-boundary="${i}"` +
+            `${canPrev ? '' : ' disabled'} title="Przesuń granicę o słowo w lewo">←</button>` +
+          `<span class="bnd-ins-brk-line"></span>` +
+          `<span class="bnd-ins-brk-no">granica ${i + 1}</span>` +
+          `<span class="bnd-ins-brk-line"></span>` +
+          `<button class="bnd-ins-btn" data-ins="next" data-boundary="${i}"` +
+            `${canNext ? '' : ' disabled'} title="Przesuń granicę o słowo w prawo">→</button>` +
+        `</div>`;
+    }
+  }
+
+  box.innerHTML = html;
+  box.dataset.wordCount = total;
+  return box;
+}
+
+function edOpenCorrectionEditor(range) {
+  const d = ED.bnd.data;
+  const [lo, hi] = range.split('-').map(Number);
+  const box = $('bndDoc').querySelector(`.bnd-board[data-range="${range}"]`);
+  if (!box || box.querySelector('textarea')) return;
+
+  const current = (d.corrections && d.corrections[range]) || edBoardText(d, lo, hi);
+  const ed = document.createElement('div');
+  ed.className = 'bnd-fix-editor';
+  ed.innerHTML =
+    `<p class="bnd-ins-hint">Poprawka zmienia tylko tekst na wyjściu — czasy cięć ` +
+    `i podział zostają bez zmian. Przesunięcie granicy tej planszy unieważnia poprawkę.</p>` +
+    `<textarea rows="5"></textarea>` +
+    `<div class="bnd-ins-editor-acts">` +
+      `<button class="btn btn-primary" data-corr="save">Zapisz poprawkę</button>` +
+      `<button class="btn btn-secondary" data-corr="cancel">Anuluj</button>` +
+      (d.corrections && d.corrections[range]
+        ? `<button class="btn btn-secondary" data-corr="clear">Przywróć oryginał</button>` : '') +
+    `</div>`;
+  ed.querySelector('textarea').value = current;
+  box.appendChild(ed);
+  ed.querySelector('textarea').focus();
+}
+
+function edOpenInsertEditor(anchor) {
+  const ins = (ED.bnd.data.inserts || []).find(x => x.anchor === anchor);
+  if (!ins) return;
+  const box = $('bndDoc').querySelector(`.bnd-insert[data-anchor="${anchor}"]`);
+  const ed = document.createElement('div');
+  ed.className = 'bnd-ins-editor';
+  ed.innerHTML =
+    `<p class="bnd-ins-hint">Wpisz, co lektor faktycznie mówi. Po zapisaniu podziel ` +
+    `fragment na plansze — każda dostanie własny punkt cięcia.</p>` +
+    `<textarea rows="6"></textarea>` +
+    `<div class="bnd-ins-editor-acts">` +
+      `<button class="btn btn-primary" data-ins="save">Zapisz tekst</button>` +
+      `<button class="btn btn-secondary" data-ins="cancel">Anuluj</button>` +
+      `<span class="bnd-ins-hint">Zmiana tekstu kasuje dotychczasowy podział wstawki.</span>` +
+    `</div>`;
+  ed.querySelector('textarea').value = ins.text;
+  box.appendChild(ed);
+  ed.querySelector('textarea').focus();
+}
+
 async function edLayoutOp(op, params) {
+  // Każda operacja to odczyt-zmiana-zapis podziału po stronie serwera. Puszczone
+  // równolegle (dwa szybkie kliknięcia „podziel") startowały od tego samego stanu
+  // i drugi zapis kasował pierwszy — dlatego trzymamy jedną operację naraz.
+  if (ED.bnd.busy) return;
+  ED.bnd.busy = true;
+  document.body.classList.add('bnd-busy');
   try {
     ED.bnd.data = await api(`/api/layout/${ED.bnd.ch}`, {
       method: 'POST',
@@ -196,6 +365,9 @@ async function edLayoutOp(op, params) {
     edRenderBoundaries();
   } catch (err) {
     notify(err.message, 'error');
+  } finally {
+    ED.bnd.busy = false;
+    document.body.classList.remove('bnd-busy');
   }
 }
 
@@ -205,11 +377,72 @@ function edInitBoundaries() {
   const doc = $('bndDoc');
 
   doc.addEventListener('click', e => {
-    const add = e.target.closest('.bnd-add');
+    const fixBtn = e.target.closest('[data-fix]');
+    if (fixBtn) { edOpenCorrectionEditor(fixBtn.dataset.fix); return; }
+
+    const corrBtn = e.target.closest('[data-corr]');
+    if (corrBtn) {
+      const box = corrBtn.closest('.bnd-board');
+      const [lo, hi] = box.dataset.range.split('-').map(Number);
+      if (corrBtn.dataset.corr === 'cancel') { edRenderBoundaries(); return; }
+      const text = corrBtn.dataset.corr === 'clear'
+        ? null : box.querySelector('textarea').value;
+      edLayoutOp('correction', { token_start: lo, token_end: hi, text });
+      return;
+    }
+
+    // Szczelina między słowami wstawki — podział dokładnie w tym miejscu.
+    const insGap = e.target.closest('.bnd-ins-gap');
+    if (insGap) {
+      const box = insGap.closest('.bnd-insert');
+      const part = insGap.closest('.bnd-ins-part');
+      // Numer planszy z pozycji w bloku — plansza jednosłowna nie ma przycisku
+      // „podziel", więc odczytanie go z przycisku bywałoby zawodne.
+      const board = Array.prototype.indexOf.call(
+        box.querySelectorAll('.bnd-ins-part'), part);
+      edLayoutOp('insert_split', {
+        anchor: Number(box.dataset.anchor), board,
+        word: Number(insGap.dataset.word),
+        word_count: Number(box.dataset.wordCount),
+      });
+      return;
+    }
+
+    const insBtn = e.target.closest('[data-ins]');
+    if (insBtn) {
+      const box = insBtn.closest('.bnd-insert');
+      const anchor = Number(box.dataset.anchor);
+      const act = insBtn.dataset.ins;
+      if (act === 'edit') { edOpenInsertEditor(anchor); return; }
+      if (act === 'cancel') { edRenderBoundaries(); return; }
+      if (act === 'save') {
+        edLayoutOp('insert_text', { anchor, text: box.querySelector('textarea').value });
+        return;
+      }
+      const ins = (ED.bnd.data.inserts || []).find(x => x.anchor === anchor);
+      const wordCount = Number(box.dataset.wordCount) || ins.word_count;
+      if (act === 'split') {
+        edLayoutOp('insert_split', {
+          anchor, board: Number(insBtn.dataset.board),
+          word: Number(insBtn.dataset.word), word_count: wordCount,
+        });
+      }
+      if (act === 'merge') {
+        edLayoutOp('insert_merge', { anchor, board: Number(insBtn.dataset.board) });
+      }
+      if (act === 'prev' || act === 'next') {
+        const i = Number(insBtn.dataset.boundary);
+        const at = ins.breaks[i] + (act === 'prev' ? -1 : 1);
+        edLayoutOp('insert_move', { anchor, boundary: i, word: at, word_count: wordCount });
+      }
+      return;
+    }
+    const add = e.target.closest('.bnd-add[data-board]');
     if (add) {
       edLayoutOp('split', { board: Number(add.dataset.board), token: Number(add.dataset.mid) });
       return;
     }
+
     const gap = e.target.closest('.bnd-gap');
     if (gap) {
       const t = Number(gap.dataset.t);
@@ -501,18 +734,26 @@ function edSetCutTime(t) {
 }
 
 async function edCommitCut(time) {
-  const C = ED.cut, token = C.data.cuts[C.sel].token, keep = C.sel;
+  const C = ED.cut;
+  // Zapis czasu cięcia też jest odczytem-zmianą-zapisem podziału. Strzałki nudge
+  // dają się klikać seriami szybciej, niż wraca odpowiedź — bez tej blokady część
+  // ustawień ginęła w wyścigu.
+  if (C.busy) return;
+  C.busy = true;
+  const key = C.data.cuts[C.sel].key, keep = C.sel;
   try {
     C.data = await api(`/api/cuts/${C.ch}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token, time }),
+      body: JSON.stringify({ key, time }),
     });
     C.times = C.data.cuts.map(c => c.time);
     C.sel = keep;
     edRenderCuts();
   } catch (err) {
     notify(err.message, 'error');
+  } finally {
+    C.busy = false;
   }
 }
 
@@ -594,12 +835,12 @@ function edInitCuts() {
 
   $('cutVerify').addEventListener('click', async () => {
     if (!C.data) return;
-    const token = C.data.cuts[C.sel].token;
+    const key = C.data.cuts[C.sel].key;
     try {
       await api(`/api/layout/${C.ch}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ op: 'reviewed', token, flag: true }),
+        body: JSON.stringify({ op: 'reviewed', key, flag: true }),
       });
       C.data.cuts[C.sel].reviewed = true;
       const next = C.data.cuts.findIndex((c, i) => i > C.sel && c.needs_attention && !c.reviewed);
@@ -641,19 +882,26 @@ async function edEnter(viewId) {
     box.innerHTML = `<div class="ed-empty">${edEsc(err.message)}</div>`;
     return;
   }
-  if (!ready.length) {
-    box.innerHTML = '<div class="ed-empty">Najpierw przetwórz rozdziały w kroku „Rozdziały”.</div>';
-    return;
-  }
   if (viewId === 'viewBoundaries') {
-    const ch = ED.bnd.ch && ready.some(c => c.chapter_num === ED.bnd.ch) ? ED.bnd.ch : ready[0].chapter_num;
+    // Podział zależy tylko od tekstu, więc ten ekran działa także przed transkrypcją.
+    const all = ED.overview;
+    if (!all.length) {
+      box.innerHTML = '<div class="ed-empty">Najpierw wgraj tekst i zatwierdź mapę rozdziałów.</div>';
+      return;
+    }
+    const ch = ED.bnd.ch && all.some(c => c.chapter_num === ED.bnd.ch) ? ED.bnd.ch : all[0].chapter_num;
     $('bndChapter').value = String(ch);
     await edLoadBoundaries(ch);
-  } else {
-    const ch = ED.cut.ch && ready.some(c => c.chapter_num === ED.cut.ch) ? ED.cut.ch : ready[0].chapter_num;
-    $('cutChapter').value = String(ch);
-    await edLoadCuts(ch);
+    return;
   }
+  if (!ready.length) {
+    box.innerHTML = '<div class="ed-empty">Punkty cięcia wymagają czasów słów — ' +
+                    'najpierw przetwórz rozdziały w kroku „Rozdziały”.</div>';
+    return;
+  }
+  const ch = ED.cut.ch && ready.some(c => c.chapter_num === ED.cut.ch) ? ED.cut.ch : ready[0].chapter_num;
+  $('cutChapter').value = String(ch);
+  await edLoadCuts(ch);
 }
 
 document.addEventListener('DOMContentLoaded', () => {

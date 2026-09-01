@@ -18,9 +18,12 @@ from .layout import (
     Layout, LayoutError, LayoutStore, Token,
     tokenize_chapter, render_text, word_times_from_payload,
     split_board, merge_boards, move_break, set_cut_time, set_reviewed, validate_layout,
+    set_correction, stale_corrections, set_insert_text, split_insert, merge_insert,
+    move_insert,
+    book_cut_key, correction_key, insert_state,
 )
 from .audio_analysis import AudioAnalysis, analyze_audio, resolve_audio_path
-from .timing import compute_chapter_timing
+from .timing import compute_chapter_timing, strip_marker, heard_text
 
 ProgressCb = Optional[Callable[[float, str], None]]
 
@@ -313,7 +316,7 @@ class PipelineManager:
         )
 
         cb(0.85, f"Rozdział {chapter_num}: dopasowanie {len(initial_chunks)} plansz do nagrania...")
-        aligned_chunks, report, word_times = self.aligner.align_chapter(
+        aligned_chunks, report, word_times, extras = self.aligner.align_chapter(
             chunks=initial_chunks, transcription=trans_res
         )
 
@@ -353,17 +356,11 @@ class PipelineManager:
                 {"w": aw.original_word, "s": aw.start, "e": aw.end, "m": aw.matched}
                 for aw in word_times
             ],
-            # Wtrącenia lektora nie mają odpowiednika w tekście, więc nie mieszczą się
-            # w liście słów; bez osobnego zapisu ginęłyby przy odtwarzaniu plansz.
-            "extras": [
-                {
-                    "position": "intro" if idx == 0 else "outro",
-                    "start_time": c.start_time,
-                    "end_time": c.end_time,
-                }
-                for idx, c in enumerate(aligned_chunks)
-                if c.chunk_type == "intro_outro"
-            ],
+            # Wstawki: fragmenty nagrania bez odpowiednika w pliku .txt — wstęp i stopka
+            # lektora, ale też akapit brakujący w środku rozdziału. Niosą własne słowa
+            # Whispera z czasami, więc po wpisaniu tekstu da się je pociąć na plansze
+            # tak samo jak zwykły tekst książki.
+            "extras": extras,
         }
 
         if save_json:
@@ -450,6 +447,32 @@ class PipelineManager:
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
 
+    def chapter_view(self, chapter_num: int) -> Dict[str, Any]:
+        """
+        Wynik rozdziału z planszami wyliczonymi z aktualnego podziału.
+
+        Studio weryfikacji i ekran montażu muszą patrzeć na tę samą listę plansz.
+        Wcześniej studio czytało `chunks` zapisane przez aligner przy przetwarzaniu,
+        a zapis poprawki szedł do plansz z podziału — po pierwszym scaleniu numery
+        rozjeżdżały się i edycja trafiała w sąsiednią planszę. Jedno źródło prawdy
+        usuwa całą tę klasę błędów.
+
+        Gdy plansz nie da się przeliczyć (brak nagrania, podział do innej wersji
+        tekstu), zwracamy zapisane `chunks` i mówimy o tym wprost przez `board_source`,
+        żeby interfejs mógł zablokować edycję zamiast zapisywać w niewiadome miejsce.
+        """
+        payload = dict(self.chapter_payload(chapter_num))
+        try:
+            payload["chunks"] = self.chapter_timing(chapter_num)["boards"]
+            payload["board_source"] = "layout"
+            payload["board_error"] = None
+        except Exception as exc:
+            payload["board_source"] = "legacy"
+            payload["board_error"] = f"{type(exc).__name__}: {exc}"
+            print(f"[Pipeline] Rozdz. {chapter_num}: plansze z zapisu pipeline'u "
+                  f"({payload['board_error']}).")
+        return payload
+
     def chapter_analysis(self, chapter_num: int) -> AudioAnalysis:
         """Obwiednia, cisze i peaki nagrania. Trzymane w pamięci — dekodowanie jest drogie."""
         with self._lock:
@@ -509,25 +532,64 @@ class PipelineManager:
         s = self.settings
         layout, tokens, chapter, fresh = self.load_layout(chapter_num)
 
-        flags: Dict[str, str] = {}
+        # Rozdział bez wyniku przetwarzania nadal ma podział — cały sens rozdzielenia
+        # warstw polega na tym, że granice da się ustawić przed uruchomieniem Whispera.
+        # Brakuje wtedy tylko tego, co pochodzi z nagrania: wstawek i flag braku pauzy.
         try:
-            for cut in self.chapter_timing(chapter_num)["cuts"]:
-                if cut.no_pause:
-                    flags[str(cut.token)] = cut.segment_text
-        except (FileNotFoundError, LayoutError) as exc:
-            print(f"[Pipeline] Rozdz. {chapter_num}: brak flag braku pauzy ({exc}).")
+            payload = self.chapter_payload(chapter_num)
+        except FileNotFoundError:
+            payload = None
+
+        flags: Dict[str, str] = {}
+        if payload is not None:
+            try:
+                for cut in self.chapter_timing(chapter_num)["cuts"]:
+                    if cut.no_pause:
+                        flags[cut.key] = cut.segment_text
+            except (FileNotFoundError, LayoutError) as exc:
+                print(f"[Pipeline] Rozdz. {chapter_num}: brak flag braku pauzy ({exc}).")
+
+        # Wstawki renderujemy razem z tekstem książki — na ekranie granic mają być
+        # widoczne tam, gdzie faktycznie wypadają, a nie w osobnej liście obok.
+        inserts = []
+        segments = (payload or {}).get("whisper_segments", [])
+        for extra in ((payload or {}).get("extras") or []):
+            anchor = int(extra.get("anchor", 0))
+            state = insert_state(layout, anchor)
+            fallback = extra.get("heard") or heard_text(
+                segments,
+                float(extra.get("start_time", 0.0)), float(extra.get("end_time", 0.0)))
+            text = state["text"] if state.get("edited") else extra.get("text")
+            body = strip_marker(text if text is not None else "") or fallback
+            inserts.append({
+                "anchor": anchor,
+                "position": extra.get("position", "inline"),
+                "start_time": extra.get("start_time"),
+                "end_time": extra.get("end_time"),
+                "heard": extra.get("heard", ""),
+                "text": body,
+                "word_count": len(body.split()),
+                "breaks": list(state.get("breaks") or []),
+                "edited": bool(state.get("edited")),
+            })
 
         return {
             "chapter_num": chapter_num,
             "header": chapter.header,
             "title": chapter.title,
             "saved": not fresh,
+            "processed": payload is not None,
+            "archived_layouts": [os.path.basename(p)
+                                 for p in self.layout_store.archived(chapter_num)],
+            "inserts": inserts,
             "text_hash": layout.text_hash,
             "token_count": layout.token_count,
             "tokens": [[t.word, t.sep] for t in tokens],
             "breaks": list(layout.breaks),
             "overrides": {str(k): v for k, v in layout.overrides.items()},
             "reviewed": sorted(layout.reviewed),
+            "corrections": dict(layout.corrections),
+            "stale_corrections": stale_corrections(layout),
             "flags": flags,
             "max_lines": s["max_lines_per_board"],
             "max_chars": s["max_chars_per_line"],
@@ -536,30 +598,119 @@ class PipelineManager:
         }
 
     def layout_operation(self, chapter_num: int, op: str, **kwargs: Any) -> Dict[str, Any]:
-        """Wykonuje jedną operację na podziale i zapisuje wynik."""
-        s = self.settings
-        layout, tokens, chapter, _fresh = self.load_layout(chapter_num)
+        """
+        Wykonuje jedną operację na podziale i zapisuje wynik.
 
-        if op == "split":
-            split_board(layout, int(kwargs["board"]), int(kwargs["token"]))
-        elif op == "merge":
-            merge_boards(layout, int(kwargs["board"]))
-        elif op == "move":
-            move_break(layout, int(kwargs["boundary"]), int(kwargs["token"]))
-        elif op == "cut_time":
-            set_cut_time(layout, int(kwargs["token"]), kwargs.get("time"))
-        elif op == "reviewed":
-            set_reviewed(layout, int(kwargs["token"]), bool(kwargs.get("flag", True)))
-        elif op == "reset":
-            self.layout_store.delete(chapter_num)
+        Całość wczytania, zmiany i zapisu idzie pod blokadą. Endpointy FastAPI są
+        synchroniczne, więc lecą w puli wątków — bez blokady dwa szybkie kliknięcia
+        wczytywały ten sam podział i drugi zapis kasował pierwszy.
+        """
+        def need(*keys: str) -> None:
+            """
+            Brakujący parametr operacji ma być czytelnym błędem, nie KeyError-em.
+            Bez tego pomyłka w interfejsie kończyła się pięćsetką i stosem wywołań
+            zamiast komunikatu, z którego cokolwiek wynika.
+            """
+            missing = [k for k in keys if kwargs.get(k) is None]
+            if missing:
+                raise LayoutError(
+                    f"Operacja „{op}” wymaga parametrów: {', '.join(missing)}."
+                )
+
+        with self._lock:
+            layout, tokens, _chapter, _fresh = self.load_layout(chapter_num)
+
+            if op == "split":
+                need("board", "token")
+                split_board(layout, int(kwargs["board"]), int(kwargs["token"]), tokens)
+            elif op == "merge":
+                need("board")
+                merge_boards(layout, int(kwargs["board"]), tokens)
+            elif op == "move":
+                need("boundary", "token")
+                move_break(layout, int(kwargs["boundary"]), int(kwargs["token"]), tokens)
+            elif op == "cut_time":
+                need("key")
+                set_cut_time(layout, str(kwargs["key"]), kwargs.get("time"))
+            elif op == "reviewed":
+                need("key")
+                set_reviewed(layout, str(kwargs["key"]), bool(kwargs.get("flag", True)))
+            elif op == "correction":
+                need("token_start", "token_end")
+                set_correction(layout, int(kwargs["token_start"]), int(kwargs["token_end"]),
+                               kwargs.get("text"))
+            elif op == "insert_text":
+                need("anchor")
+                set_insert_text(layout, int(kwargs["anchor"]), str(kwargs.get("text") or ""))
+            elif op == "insert_split":
+                need("anchor", "board", "word", "word_count")
+                split_insert(layout, int(kwargs["anchor"]), int(kwargs["board"]),
+                             int(kwargs["word"]), int(kwargs["word_count"]))
+            elif op == "insert_merge":
+                need("anchor", "board")
+                merge_insert(layout, int(kwargs["anchor"]), int(kwargs["board"]))
+            elif op == "insert_move":
+                need("anchor", "boundary", "word", "word_count")
+                move_insert(layout, int(kwargs["anchor"]), int(kwargs["boundary"]),
+                            int(kwargs["word"]), int(kwargs["word_count"]))
+            elif op == "reset":
+                # Powrót do propozycji automatu — zapis znika, nie ma czego zapisywać.
+                self.layout_store.delete(chapter_num)
+                layout = None
+            else:
+                raise LayoutError(f"Nieznana operacja podziału: {op}.")
+
+            if layout is not None:
+                self.layout_store.save(layout)
             self._forget_timing(chapter_num)
-            return self.layout_state(chapter_num)
-        else:
-            raise LayoutError(f"Nieznana operacja podziału: {op}.")
 
-        self.layout_store.save(layout)
-        self._forget_timing(chapter_num)
+        # Przeliczenie stanu idzie już bez blokady — potrafi zejść do analizy nagrania,
+        # a to sekundy, przez które nikt inny nie mógłby tknąć żadnego rozdziału.
         return self.layout_state(chapter_num)
+
+    def edit_board_text(self, chapter_num: int, text: str,
+                        cut_key: Optional[str] = None,
+                        chunk_id: Optional[int] = None) -> Dict[str, Any]:
+        """
+        Zmienia tekst planszy z poziomu studia weryfikacji.
+
+        Planszę wskazuje `cut_key` — identyfikator granicy, na której się zaczyna
+        („b<słowo>" dla tekstu książki, „i<kotwica>.<plansza>" dla wstawki). Numer
+        `chunk_id` jest wyłącznie pozycją w liście i przestaje wskazywać tę samą
+        planszę po każdym scaleniu czy podziale; przyjmujemy go jeszcze dla starszych
+        klientów, ale wtedy sprawdzamy, czy tekst faktycznie się zgadza, zamiast
+        zapisać poprawkę w przypadkowym miejscu.
+
+        Plansze są wyliczane z podziału, więc zapis do chapter_*.json nic by nie dał —
+        pełny eksport i tak odbudowuje je od nowa. Poprawka trafia tam, gdzie przetrwa:
+        plansza z książki dostaje korektę tekstu, plansza wstawki nową treść.
+        """
+        boards = self.chapter_timing(chapter_num)["boards"]
+
+        if cut_key:
+            board = next((b for b in boards if b["cut_key"] == cut_key), None)
+            if not board:
+                raise ValueError(
+                    f"Rozdział {chapter_num} nie ma już planszy „{cut_key}”. "
+                    "Podział zmienił się w międzyczasie — odśwież widok."
+                )
+        elif chunk_id is not None:
+            board = next((b for b in boards if b["chunk_id"] == chunk_id), None)
+            if not board:
+                raise ValueError(f"Rozdział {chapter_num} nie ma planszy numer {chunk_id}.")
+        else:
+            raise ValueError("Wskaż planszę przez cut_key albo chunk_id.")
+
+        if board["kind"] == "insert":
+            self.layout_operation(chapter_num, "insert_text",
+                                  anchor=board["anchor"], text=text)
+        else:
+            self.layout_operation(chapter_num, "correction",
+                                  token_start=board["token_start"],
+                                  token_end=board["token_end"], text=text)
+
+        updated = self.chapter_timing(chapter_num)["boards"]
+        return next((b for b in updated if b["cut_key"] == board["cut_key"]), board)
 
     def _forget_timing(self, chapter_num: int) -> None:
         """Podział się zmienił — plansze i cięcia trzeba policzyć od nowa."""
@@ -579,12 +730,16 @@ class PipelineManager:
             "header": result["header"],
             "audio_file": result["audio_file"],
             "duration": round(analysis.envelope.duration, 3),
-            "cuts": [dict(c.to_dict(), reviewed=c.token in reviewed) for c in result["cuts"]],
+            "cuts": [dict(c.to_dict(), reviewed=c.key in reviewed) for c in result["cuts"]],
             "boards": [
                 {
                     "id": b["chunk_id"], "text": b["text"], "type": b["chunk_type"],
                     "lines": b["lines_count"], "token_start": b["token_start"],
-                    "token_end": b["token_end"],
+                    "token_end": b["token_end"], "kind": b["kind"], "anchor": b["anchor"],
+                    "insert_board": b["insert_board"], "edited": b["edited"],
+                    "corrected": b["corrected"], "cut_key": b["cut_key"],
+                    "start_time": b["start_time"], "end_time": b["end_time"],
+                    "duration": b["duration"],
                 }
                 for b in result["boards"]
             ],
@@ -616,17 +771,23 @@ class PipelineManager:
         for chapter in self.get_chapters():
             entry = {"chapter_num": chapter.number, "header": chapter.header,
                      "title": chapter.title, "processed": self.is_processed(chapter.number),
-                     "saved_layout": os.path.exists(self.layout_store.path(chapter.number)),
-                     "boards": None, "attention": None, "error": None}
-            if entry["processed"]:
-                try:
+                     "saved_layout": False, "boards": None, "attention": None,
+                     "reviewed": 0, "archived_layouts": 0, "error": None}
+            try:
+                layout, tokens, _c, fresh = self.load_layout(chapter.number)
+                # „Zapisany podział" znaczy: da się go użyć. Samo istnienie pliku
+                # nic nie mówi — podział do innej wersji tekstu i tak zostanie
+                # odrzucony przy wczytaniu, a nagłówek pokazywał wtedy nieprawdę.
+                entry["saved_layout"] = not fresh
+                entry["boards"] = layout.board_count
+                entry["reviewed"] = len(layout.reviewed)
+                entry["archived_layouts"] = len(self.layout_store.archived(chapter.number))
+                if entry["processed"]:
                     summary = self.chapter_timing(chapter.number)["summary"]
-                    layout, _t, _c, _f = self.load_layout(chapter.number)
                     entry["boards"] = summary["boards"]
                     entry["attention"] = summary["attention"]
-                    entry["reviewed"] = len(layout.reviewed)
-                except Exception as exc:  # rozdział nie może wywrócić listy pozostałych
-                    entry["error"] = f"{type(exc).__name__}: {exc}"
+            except Exception as exc:  # rozdział nie może wywrócić listy pozostałych
+                entry["error"] = f"{type(exc).__name__}: {exc}"
             out.append(entry)
         return out
 
@@ -675,10 +836,12 @@ class PipelineManager:
             try:
                 enriched["chunks"] = self.chapter_timing(num)["chunks"]
                 enriched["cut_source"] = "layout"
+                enriched["cut_error"] = None
             except Exception as exc:
                 enriched["cut_source"] = "legacy"
+                enriched["cut_error"] = f"{type(exc).__name__}: {exc}"
                 print(f"[Pipeline] Rozdz. {num}: eksport z zapisanych plansz "
-                      f"({type(exc).__name__}: {exc}).")
+                      f"({enriched['cut_error']}).")
             out.append(enriched)
         return out
 
@@ -696,7 +859,25 @@ class PipelineManager:
         title = book_name or self.project.title or "Ksiazka"
         cb(0.02, f"Eksport paczki „{title}” ({len(processed)} rozdz., cięcie audio: {'tak' if slice_audio else 'nie'})...")
 
-        zip_path = create_book_zip_package(
+        # Rozdziały, dla których nie dało się przeliczyć plansz, idą do paczki ze
+        # starymi czasami i BEZ ręcznego montażu. Wcześniej wiedział o tym wyłącznie
+        # log serwera, więc użytkownik dostawał ZIP bez swoich poprawek i nie miał
+        # jak się o tym dowiedzieć.
+        degraded = [
+            {"chapter_num": p.get("chapter_num"), "reason": p.get("cut_error")}
+            for p in processed if p.get("cut_source") == "legacy"
+        ]
+        if degraded and len(degraded) == len(processed):
+            raise ValueError(
+                "Żadnego rozdziału nie da się złożyć z zatwierdzonego podziału "
+                f"(pierwszy błąd: {degraded[0]['reason']}). Paczka zawierałaby wyłącznie "
+                "stare plansze bez ręcznych poprawek — przetwórz rozdziały ponownie."
+            )
+        if degraded:
+            cb(0.03, f"Uwaga: {len(degraded)} rozdz. bez ręcznego montażu "
+                     f"(nr: {', '.join(str(d['chapter_num']) for d in degraded)}).")
+
+        zip_path, slice_failures = create_book_zip_package(
             book_name=title,
             packages_base_dir=self.packages_dir,
             processed_chapters=processed,
@@ -708,12 +889,19 @@ class PipelineManager:
         project.status["exported"] = True
         self.save_project()
 
-        cb(1.0, f"Paczka gotowa: {os.path.basename(zip_path)}")
+        note = f"Paczka gotowa: {os.path.basename(zip_path)}"
+        if degraded:
+            note += f" — {len(degraded)} rozdz. bez ręcznego montażu"
+        if slice_failures:
+            note += f" — {len(slice_failures)} plansz bez audio"
+        cb(1.0, note)
         return {
             "zip_path": zip_path,
             "zip_name": os.path.basename(zip_path),
             "size_bytes": os.path.getsize(zip_path) if os.path.exists(zip_path) else 0,
             "chapters": len(processed),
+            "degraded_chapters": degraded,
+            "slice_failures": slice_failures,
         }
 
 

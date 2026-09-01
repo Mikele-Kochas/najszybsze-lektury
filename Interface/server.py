@@ -2,6 +2,7 @@ import os
 import sys
 import json
 import random
+import threading
 from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any
 
@@ -16,7 +17,6 @@ from pydantic import BaseModel
 
 from Engine.pipeline import PipelineManager
 from Engine.jobs import JobManager
-from Engine.exporter import export_chapter_package
 
 app = FastAPI(title="Najszybsze Lektury — Studio Produkcyjne")
 
@@ -48,6 +48,9 @@ _last_proposal: Optional[Dict[str, Any]] = None
 class ReviewItem(BaseModel):
     chapter_num: int
     chunk_id: int
+    # Ocena dotyczy konkretnej planszy, a numer chunk_id zmienia znaczenie po każdym
+    # scaleniu czy podziale. Klucz cięcia przeżywa te operacje.
+    cut_key: Optional[str] = None
     is_correct: bool
     status: str  # 'ok' | 'mismatch' | 'missing_source' | 'timing_issue'
     comment: Optional[str] = ""
@@ -58,8 +61,12 @@ class ReviewItem(BaseModel):
 
 class ChunkEditItem(BaseModel):
     chapter_num: int
-    chunk_id: int
     text: str
+    # Stabilny identyfikator planszy („b<slowo>" / „i<kotwica>.<plansza>"). Numer
+    # chunk_id to tylko pozycja w liscie i po scaleniu plansz wskazuje juz co innego —
+    # zostaje wylacznie dla starszych klientow.
+    cut_key: Optional[str] = None
+    chunk_id: Optional[int] = None
 
 
 class ChapterMapEntry(BaseModel):
@@ -79,15 +86,23 @@ class ChapterMapPayload(BaseModel):
 
 
 class LayoutOp(BaseModel):
-    op: str                              # 'split'|'merge'|'move'|'reset'|'reviewed'
-    board: Optional[int] = None          # split, merge — numer planszy (od 0)
+    op: str          # split|merge|move|reset|reviewed|cut_time|correction|insert_*
+    board: Optional[int] = None          # split, merge, insert_* — numer planszy (od 0)
     boundary: Optional[int] = None       # move — numer granicy (od 0)
-    token: Optional[int] = None          # split, move, reviewed — indeks słowa
+    token: Optional[int] = None          # split, move — indeks słowa
+    key: Optional[str] = None            # reviewed, cut_time — identyfikator cięcia
     flag: Optional[bool] = None          # reviewed — oznacz / odznacz
+    time: Optional[float] = None         # cut_time — czas cięcia
+    text: Optional[str] = None           # correction, insert_text — treść
+    token_start: Optional[int] = None    # correction — zakres słów planszy
+    token_end: Optional[int] = None
+    anchor: Optional[int] = None         # insert_* — kotwica wstawki
+    word: Optional[int] = None           # insert_split — słowo podziału
+    word_count: Optional[int] = None     # insert_split — długość wstawki w słowach
 
 
 class CutTime(BaseModel):
-    token: int                           # indeks słowa, na którym stoi granica
+    key: str                             # identyfikator cięcia ("b123", "i0.1", "end")
     time: Optional[float] = None         # null przywraca czas z automatu
 
 
@@ -129,9 +144,33 @@ def load_reviews() -> List[Dict[str, Any]]:
     return []
 
 
+# RLock, bo add_review trzyma go wokół całego odczytu-zmiany-zapisu, a save_reviews
+# bierze go jeszcze raz w środku.
+_reviews_lock = threading.RLock()
+
+
 def save_reviews(reviews: List[Dict[str, Any]]) -> None:
-    with open(REVIEWS_FILE, 'w', encoding='utf-8') as f:
-        json.dump(reviews, f, ensure_ascii=False, indent=2)
+    """
+    Zapis atomowy pod blokadą.
+
+    Endpointy lecą w puli wątków, więc dwie oceny zapisane naraz potrafiły nadpisać
+    się nawzajem, a przerwany zapis zostawiał obcięty JSON, który `load_reviews()`
+    po cichu zamienia na pustą listę — czyli kasuje całą historię ocen.
+    """
+    tmp_path = REVIEWS_FILE + ".tmp"
+    with _reviews_lock:
+        with open(tmp_path, 'w', encoding='utf-8') as f:
+            json.dump(reviews, f, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, REVIEWS_FILE)
+
+
+def _same_board(review: Dict[str, Any], item: "ReviewItem") -> bool:
+    """Czy zapisana ocena dotyczy tej samej planszy co nowa."""
+    if review.get("chapter_num") != item.chapter_num:
+        return False
+    if item.cut_key and review.get("cut_key"):
+        return review["cut_key"] == item.cut_key
+    return review.get("chunk_id") == item.chunk_id
 
 
 def require_no_active_job() -> None:
@@ -385,46 +424,30 @@ def process_chapters(payload: ProcessPayload):
 
 @app.get("/api/chapter/{chapter_num}")
 def get_chapter_data(chapter_num: int):
-    json_path = pipeline.chapter_json_path(chapter_num)
-    if not os.path.exists(json_path):
-        raise HTTPException(status_code=404, detail=f"Rozdział {chapter_num} nie został jeszcze przetworzony.")
-    with open(json_path, 'r', encoding='utf-8') as f:
-        return json.load(f)
+    """
+    Wynik rozdziału z planszami wyliczonymi z zatwierdzonego podziału.
+
+    Plansze pochodzą stąd, skąd bierze je montaż i eksport — jedna lista dla całej
+    aplikacji. Wcześniej ten endpoint zwracał `chunks` zapisane przez aligner, więc
+    studio weryfikacji numerowało plansze inaczej niż zapis poprawek.
+    """
+    return _guard(pipeline.chapter_view, chapter_num)
 
 
 @app.post("/api/chunk/edit")
 def edit_chunk(item: ChunkEditItem):
     """
-    Zmienia tekst planszy (np. akceptacja tekstu Whispera na wtrąceniu)
-    i od razu odświeża pliki tekstowe rozdziału.
+    Zmienia tekst planszy — akceptacja tego, co usłyszał Whisper, albo własna poprawka.
+
+    Zapis idzie do podziału rozdziału, nie do wyniku przetwarzania: plansze są z niego
+    wyliczane, więc tylko tam poprawka przetrwa do eksportu paczki.
     """
-    json_path = pipeline.chapter_json_path(item.chapter_num)
-    if not os.path.exists(json_path):
-        raise HTTPException(status_code=404, detail="Rozdział nie został przetworzony.")
-
-    with open(json_path, 'r', encoding='utf-8') as f:
-        data = json.load(f)
-
-    target_chunk = None
-    for c in data.get("chunks", []):
-        if c["chunk_id"] == item.chunk_id:
-            c["text"] = item.text.strip()
-            c["chunk_type"] = "edited"
-            target_chunk = c
-            break
-
-    if not target_chunk:
-        raise HTTPException(status_code=404, detail="Nie znaleziono planszy o podanym numerze.")
-
-    with open(json_path, 'w', encoding='utf-8') as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
-    # Odświeżamy tylko teksty — ponowne cięcie audio całego rozdziału przy każdej
-    # edycji byłoby nieproporcjonalnie kosztowne; robi je dopiero eksport paczki.
-    book_dir = os.path.join(pipeline.packages_dir, pipeline.project.title or "Ksiazka")
-    export_res = export_chapter_package(data, book_dir, slice_audio=False, clean=False)
-
-    return {"success": True, "updated_chunk": target_chunk, "export": export_res}
+    if not item.cut_key and item.chunk_id is None:
+        raise HTTPException(status_code=400,
+                            detail="Wskaż planszę przez cut_key albo chunk_id.")
+    board = _guard(pipeline.edit_board_text, item.chapter_num, item.text,
+                   cut_key=item.cut_key, chunk_id=item.chunk_id)
+    return {"success": True, "updated_chunk": board}
 
 
 @app.get("/api/audio/{chapter_num}")
@@ -485,7 +508,7 @@ def get_cuts(chapter_num: int):
 def set_cut(chapter_num: int, item: CutTime):
     """Ręczne ustawienie czasu cięcia. time=null przywraca wartość z automatu."""
     _guard(pipeline.layout_operation, chapter_num, "cut_time",
-           token=item.token, time=item.time)
+           key=item.key, time=item.time)
     return _guard(pipeline.cuts_state, chapter_num)
 
 
@@ -506,7 +529,10 @@ def get_random_sample(
 ):
     """Losowa plansza do weryfikacji na ślepo."""
     reviews = load_reviews()
-    reviewed_keys = {(r["chapter_num"], r["chunk_id"]) for r in reviews}
+    # Ocena zapisana przed wprowadzeniem cut_key ma tylko numer planszy — bierzemy
+    # oba klucze, żeby stara historia nadal wykluczała obejrzane plansze.
+    reviewed_cut_keys = {(r["chapter_num"], r["cut_key"]) for r in reviews if r.get("cut_key")}
+    reviewed_ids = {(r["chapter_num"], r["chunk_id"]) for r in reviews}
 
     available = [
         int(fn.split("_")[1].split(".")[0])
@@ -519,21 +545,34 @@ def get_random_sample(
             detail="Żaden rozdział nie został jeszcze przetworzony.",
         )
 
-    target_ch = chapter_num if chapter_num in available else random.choice(available)
+    # Prośba o konkretny rozdział musi dostać ten rozdział albo jasną odmowę.
+    # Podstawianie losowego innego wyglądało jak wynik dla wybranego i prowadziło
+    # do oceniania plansz z zupełnie innego miejsca książki.
+    if chapter_num is not None and chapter_num not in available:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Rozdział {chapter_num} nie został jeszcze przetworzony. "
+                   f"Przetworzone: {', '.join(map(str, sorted(available)))}.",
+        )
+    target_ch = chapter_num if chapter_num is not None else random.choice(available)
 
-    with open(pipeline.chapter_json_path(target_ch), 'r', encoding='utf-8') as f:
-        data = json.load(f)
+    data = _guard(pipeline.chapter_view, target_ch)
 
     chunks = data.get("chunks", [])
     if not chunks:
         raise HTTPException(status_code=404, detail="Rozdział nie zawiera plansz.")
 
+    def seen(c: Dict[str, Any]) -> bool:
+        if c.get("cut_key") and (target_ch, c["cut_key"]) in reviewed_cut_keys:
+            return True
+        return (target_ch, c["chunk_id"]) in reviewed_ids
+
     eligible = chunks
     if exclude_reviewed:
-        eligible = [c for c in chunks if (target_ch, c["chunk_id"]) not in reviewed_keys] or chunks
+        eligible = [c for c in chunks if not seen(c)] or chunks
 
     selected_chunk = random.choice(eligible)
-    actual_idx = next(i for i, c in enumerate(chunks) if c["chunk_id"] == selected_chunk["chunk_id"])
+    actual_idx = chunks.index(selected_chunk)
 
     start_t, end_t = selected_chunk["start_time"], selected_chunk["end_time"]
     whisper_text = " ".join(
@@ -553,7 +592,10 @@ def get_random_sample(
         "total_chunks_in_chapter": len(chunks),
         "existing_review": next(
             (r for r in reviews
-             if r["chapter_num"] == target_ch and r["chunk_id"] == selected_chunk["chunk_id"]),
+             if r["chapter_num"] == target_ch and (
+                 (selected_chunk.get("cut_key") and r.get("cut_key") == selected_chunk["cut_key"])
+                 or (not r.get("cut_key") and r["chunk_id"] == selected_chunk["chunk_id"])
+             )),
             None,
         ),
     }
@@ -561,15 +603,15 @@ def get_random_sample(
 
 @app.post("/api/review")
 def add_review(item: ReviewItem):
-    reviews = [
-        r for r in load_reviews()
-        if not (r["chapter_num"] == item.chapter_num and r["chunk_id"] == item.chunk_id)
-    ]
-    reviews.append({
-        **item.model_dump(),
-        "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-    })
-    save_reviews(reviews)
+    # Odczyt i zapis pod jedną blokadą — inaczej dwie oceny zapisane naraz gubiły
+    # jedną z siebie, bo obie startowały od tej samej listy.
+    with _reviews_lock:
+        reviews = [r for r in load_reviews() if not _same_board(r, item)]
+        reviews.append({
+            **item.model_dump(),
+            "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        })
+        save_reviews(reviews)
     return {"success": True, "total_reviews": len(reviews)}
 
 

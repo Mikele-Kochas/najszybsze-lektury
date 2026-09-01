@@ -520,10 +520,24 @@ $('btnBuildExport').addEventListener('click', async () => {
     });
     watchJob(job.id, (finished) => {
       const r = finished.result || {};
+      const degraded = r.degraded_chapters || [];
+      const failures = r.slice_failures || [];
+      // Paczka bez ręcznego montażu albo bez części plików audio to nadal „sukces"
+      // z punktu widzenia zadania — ale użytkownik musi to zobaczyć, zanim ją wyśle.
+      const warnings = [];
+      if (degraded.length) {
+        warnings.push(`⚠️ ${degraded.length} rozdz. bez ręcznego montażu ` +
+          `(nr: ${degraded.map(d => escapeHtml(String(d.chapter_num))).join(', ')}) — ` +
+          `poszły stare czasy i teksty. Przetwórz je ponownie.`);
+      }
+      if (failures.length) {
+        warnings.push(`⚠️ Nie wycięto ${failures.length} plansz audio — paczka jest niepełna.`);
+      }
       $('exportSummary').hidden = false;
       $('exportSummary').innerHTML =
-        `✅ Paczka <b>${escapeHtml(r.zip_name || '')}</b> — ` +
-        `${r.chapters} rozdziałów, ${(r.size_bytes / 1048576).toFixed(1)} MB.`;
+        `${warnings.length ? '⚠️' : '✅'} Paczka <b>${escapeHtml(r.zip_name || '')}</b> — ` +
+        `${r.chapters} rozdziałów, ${(r.size_bytes / 1048576).toFixed(1)} MB.` +
+        (warnings.length ? `<div class="export-warn">${warnings.join('<br>')}</div>` : '');
       $('btnDownloadZip').disabled = false;
     });
   } catch (err) { alert(err.message); }

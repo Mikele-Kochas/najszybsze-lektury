@@ -120,13 +120,25 @@ def normalize_newlines(text: str) -> str:
 # zgubic przy edycji, a wtedy tytul z "\" utworzylby zagniezdzone katalogi.
 ILLEGAL_NAME_CHARS = set('\\/:*?"<>|\r\n\t')
 
+# Nazwy urzadzen DOS. Windows odrzuca je jako nazwy plikow i katalogow niezaleznie od
+# rozszerzenia, wiec ksiazka zatytulowana "Aux" wywracalaby tworzenie paczki.
+RESERVED_NAMES = {
+    "CON", "PRN", "AUX", "NUL",
+    *{f"COM{i}" for i in range(1, 10)},
+    *{f"LPT{i}" for i in range(1, 10)},
+}
+
 
 def safe_component(text: str, fallback: str = "projekt") -> str:
     """Czysci nazwe tak, by nadawala sie na nazwe pliku/katalogu na Windows i Linux."""
     cleaned = unicodedata.normalize("NFC", (text or "").strip())
     cleaned = "".join(ch for ch in cleaned if ch not in ILLEGAL_NAME_CHARS)
     cleaned = re.sub(r"\s+", " ", cleaned).strip(" .")
-    return cleaned or fallback
+    if not cleaned:
+        return fallback
+    if cleaned.split(".")[0].upper() in RESERVED_NAMES:
+        cleaned = f"_{cleaned}"
+    return cleaned
 
 
 @dataclass
@@ -185,11 +197,12 @@ class ProjectStore:
         self.audio_dir = os.path.join(data_dir, "Audio")
         self.cache_dir = os.path.join(data_dir, "Cache_Transcripts")
         self.processed_dir = os.path.join(data_dir, "Processed_JSON")
+        self.layouts_dir = os.path.join(data_dir, "Layouts")
         self.packages_dir = os.path.join(data_dir, "Output_Packages")
         self.archive_dir = os.path.join(data_dir, "Poprzedni_projekt")
         self.manifest_path = os.path.join(data_dir, MANIFEST_NAME)
         for d in (self.text_dir, self.audio_dir, self.cache_dir,
-                  self.processed_dir, self.packages_dir):
+                  self.processed_dir, self.packages_dir, self.layouts_dir):
             os.makedirs(d, exist_ok=True)
 
     # ---------- manifest ----------
@@ -261,24 +274,28 @@ class ProjectStore:
         """
         Przygotowuje projekt na nowe materialy.
 
-        Pliki zrodlowe (.txt i audio) sa PRZENOSZONE do Data/Poprzedni_projekt/,
-        a nie kasowane - wgranie nowej ksiazki nie moze bezpowrotnie niszczyc
-        materialow, ktorych uzytkownik moze nie miec nigdzie indziej.
-        Trzymamy jeden poziom cofniecia; wyniki pochodne (cache, JSON) sa usuwane,
-        bo odtwarza je ponowne przetworzenie.
+        Pliki zrodlowe (.txt i audio) oraz podzialy na plansze sa PRZENOSZONE do
+        Data/Poprzedni_projekt/, a nie kasowane - wgranie nowej ksiazki nie moze
+        bezpowrotnie niszczyc materialow, ktorych uzytkownik moze nie miec nigdzie
+        indziej, ani godzin recznego montazu. Trzymamy jeden poziom cofniecia;
+        wyniki pochodne (cache, JSON) sa usuwane, bo odtwarza je ponowne przetworzenie.
+
+        Podzialy musza znikac z Layouts/ razem ze zrodlami: zostawione, trafialyby
+        na nowa ksiazke, gdzie i tak nie pasuja do tekstu.
         """
+        movable = (self.text_dir, self.audio_dir, self.layouts_dir)
         if archive and (self._has_files(self.text_dir) or self._has_files(self.audio_dir)):
             if os.path.isdir(self.archive_dir):
                 shutil.rmtree(self.archive_dir, ignore_errors=True)
             os.makedirs(self.archive_dir, exist_ok=True)
-            for directory in (self.text_dir, self.audio_dir):
+            for directory in movable:
                 if os.path.isdir(directory):
                     shutil.move(directory, os.path.join(self.archive_dir, os.path.basename(directory)))
             if os.path.exists(self.manifest_path):
                 shutil.copy2(self.manifest_path, os.path.join(self.archive_dir, MANIFEST_NAME))
-            print(f"[ProjectStore] Poprzednie zrodla przeniesiono do {self.archive_dir}")
+            print(f"[ProjectStore] Poprzednie zrodla i podzialy przeniesiono do {self.archive_dir}")
         else:
-            for directory in (self.text_dir, self.audio_dir):
+            for directory in movable:
                 if os.path.isdir(directory):
                     shutil.rmtree(directory, ignore_errors=True)
 
@@ -286,7 +303,8 @@ class ProjectStore:
             if os.path.isdir(directory):
                 shutil.rmtree(directory, ignore_errors=True)
 
-        for directory in (self.text_dir, self.audio_dir, self.cache_dir, self.processed_dir):
+        for directory in (self.text_dir, self.audio_dir, self.cache_dir,
+                          self.processed_dir, self.layouts_dir):
             os.makedirs(directory, exist_ok=True)
 
     @staticmethod

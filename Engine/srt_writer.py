@@ -16,16 +16,29 @@ def format_srt_timestamp(seconds: float) -> str:
     return f"{hours:02d}:{min_:02d}:{sec:02d},{ms:03d}"
 
 
+def srt_cue_text(text: str) -> str:
+    """
+    Tekst planszy w postaci bezpiecznej dla SRT.
+
+    W formacie SRT pusta linia konczy napis, wiec akapit rozdzielony pusta linia
+    rozbilby plik na smieciowe wpisy. Tekst korekty pochodzi z pola tekstowego
+    w przegladarce, gdzie uzytkownik moze wcisnac Enter dwa razy - dlatego zwijamy
+    ciagi pustych linii do pojedynczego lamania.
+    """
+    lines = [line.strip() for line in (text or '').splitlines()]
+    return "\n".join(line for line in lines if line)
+
+
 def generate_srt_content(chunks: List[BoardChunk]) -> str:
     """Generates valid SRT formatted string from list of BoardChunks."""
     lines = []
     for idx, chunk in enumerate(chunks, start=1):
         start_str = format_srt_timestamp(chunk.start_time)
         end_str = format_srt_timestamp(chunk.end_time)
-        
+
         lines.append(str(idx))
         lines.append(f"{start_str} --> {end_str}")
-        lines.append(chunk.text.strip())
+        lines.append(srt_cue_text(chunk.text))
         lines.append("")  # Empty line separator
 
     return "\n".join(lines)

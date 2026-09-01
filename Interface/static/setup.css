@@ -479,3 +479,15 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 }
 .field-note.ok   { color: var(--nl-ok); }
 .field-note.warn { color: var(--nl-warn); }
+
+/* Ostrzeżenia eksportu: paczka powstała, ale czegoś w niej brakuje. */
+.export-warn {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border-left: 3px solid var(--nl-warn);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--nl-warn) 10%, transparent);
+  color: var(--nl-warn);
+  font-size: .86rem;
+  line-height: 1.5;
+}

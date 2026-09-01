@@ -3,7 +3,7 @@ import re
 import shutil
 import zipfile
 import subprocess
-from typing import List, Dict, Any, Optional, Callable
+from typing import List, Dict, Any, Optional, Callable, Tuple
 
 from .chunker import BoardChunk
 from .srt_writer import write_srt_file
@@ -65,8 +65,14 @@ def slice_audio_with_ffmpeg(
     chunks: List[Dict[str, Any]],
     output_audio_dir: str,
     progress_cb: ProgressCb = None,
+    failures: Optional[List[Dict[str, Any]]] = None,
 ) -> List[str]:
-    """Tnie nagranie źródłowe na osobne MP3 per plansza."""
+    """
+    Tnie nagranie źródłowe na osobne MP3 per plansza.
+
+    Plansze, których nie udało się wyciąć, dopisujemy do `failures`. Bez tego brakujący
+    plik w paczce był widoczny wyłącznie w logu serwera, a eksport meldował sukces.
+    """
     os.makedirs(output_audio_dir, exist_ok=True)
     generated_files: List[str] = []
     total = len(chunks)
@@ -92,6 +98,9 @@ def slice_audio_with_ffmpeg(
         except subprocess.CalledProcessError as e:
             detail = (e.stderr or b"").decode("utf-8", errors="replace").strip()[:200]
             print(f"[Exporter] Nie udało się wyciąć planszy #{idx} ({out_filename}): {detail}")
+            if failures is not None:
+                failures.append({"chunk_id": c.get("chunk_id", idx),
+                                 "file": out_filename, "reason": detail})
         except FileNotFoundError:
             raise RuntimeError(
                 "Nie znaleziono ffmpeg. Zainstaluj ffmpeg i dodaj go do PATH, "
@@ -110,6 +119,7 @@ def export_chapter_package(
     slice_audio: bool = True,
     clean: bool = True,
     progress_cb: ProgressCb = None,
+    failures: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """
     Eksportuje jeden rozdział do struktury:
@@ -121,8 +131,10 @@ def export_chapter_package(
     audio_dir = os.path.join(ch_dir, "Audio")
 
     # Bez czyszczenia w paczce zostają pliki z poprzedniego przebiegu, gdy liczba
-    # plansz zmalała (np. po edycji tekstu planszy w interfejsie).
-    if clean and slice_audio and os.path.isdir(audio_dir):
+    # plansz zmalała (np. po scaleniu plansz w montażu). Czyścimy też przy eksporcie
+    # bez cięcia audio — inaczej w paczce zostawały MP3 z nieaktualnego podziału,
+    # nazwane tekstem, którego już nie ma na żadnej planszy.
+    if clean and os.path.isdir(audio_dir):
         shutil.rmtree(audio_dir, ignore_errors=True)
 
     os.makedirs(texts_dir, exist_ok=True)
@@ -157,9 +169,13 @@ def export_chapter_package(
     sliced_count = 0
     source_audio = chapter_data.get("audio_path")
     if slice_audio and source_audio and os.path.exists(source_audio):
-        sliced_count = len(slice_audio_with_ffmpeg(source_audio, chunks, audio_dir, progress_cb))
+        sliced_count = len(slice_audio_with_ffmpeg(
+            source_audio, chunks, audio_dir, progress_cb, failures))
     elif slice_audio:
         print(f"[Exporter] Rozdział {ch_num}: brak pliku źródłowego audio, pomijam cięcie.")
+        if failures is not None:
+            failures.append({"chunk_id": None, "file": f"Rozdział {ch_num:02d}",
+                             "reason": "brak pliku źródłowego audio"})
 
     return {
         "chapter_num": ch_num,
@@ -179,12 +195,23 @@ def create_book_zip_package(
     processed_chapters: List[Dict[str, Any]],
     slice_audio: bool = True,
     progress_cb: ProgressCb = None,
-) -> str:
-    """Buduje pełną strukturę katalogów książki i pakuje ją do {book_name}.zip."""
+) -> Tuple[str, List[Dict[str, Any]]]:
+    """
+    Buduje pełną strukturę katalogów książki i pakuje ją do {book_name}.zip.
+
+    Zwraca (ścieżka_zip, nieudane_cięcia).
+    """
     safe_book_name = safe_component(book_name, "Ksiazka")
     book_dir = os.path.join(packages_base_dir, safe_book_name)
+
+    # Katalog paczki jest w całości odtwarzalny, więc budujemy go od zera. Bez tego
+    # zostawały w nim rozdziały z poprzedniego przebiegu — po skróceniu książki
+    # trafiały do ZIP-a rozdziały, których w projekcie już nie ma.
+    if os.path.isdir(book_dir):
+        shutil.rmtree(book_dir, ignore_errors=True)
     os.makedirs(book_dir, exist_ok=True)
 
+    failures: List[Dict[str, Any]] = []
     total = max(1, len(processed_chapters))
     for idx, ch_data in enumerate(processed_chapters):
         base = idx / total
@@ -196,6 +223,7 @@ def create_book_zip_package(
             book_dir,
             slice_audio=slice_audio,
             progress_cb=(lambda p, m, _b=base, _s=span: progress_cb(_b + _s * p, m)) if progress_cb else None,
+            failures=failures,
         )
 
     if progress_cb:
@@ -210,6 +238,8 @@ def create_book_zip_package(
 
     size_mb = os.path.getsize(zip_output_path) / 1_048_576
     print(f"[Exporter] Paczka ZIP: {zip_output_path} ({size_mb:.1f} MB)")
+    if failures:
+        print(f"[Exporter] Nie wycięto {len(failures)} plansz — paczka jest niepełna.")
     if progress_cb:
         progress_cb(1.0, f"Zapakowano {size_mb:.1f} MB")
-    return zip_output_path
+    return zip_output_path, failures

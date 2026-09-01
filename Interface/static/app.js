@@ -172,6 +172,14 @@ async function loadContinuousChapter(chapterNum = 1, startAtTime = 0.0) {
     currentSample = null;
     activeChunkId = null;
 
+    // Gdy plansz nie da się złożyć z zatwierdzonego podziału, serwer zwraca te
+    // zapisane przy przetwarzaniu. Nie mają kluczy cięć, więc edycja tekstu nie ma
+    // się do czego przypiąć — trzeba o tym powiedzieć, a nie pozwolić zapisać w ciemno.
+    if (data.board_source === 'legacy') {
+      showToast('Plansze ze starego zapisu — edycja tekstu niedostępna. ' +
+                'Przetwórz rozdział ponownie.', 'error');
+    }
+
     badgeChapter.textContent = data.chapter_header;
     timelineTotalCount.textContent = `${allChapterChunks.length} plansz`;
 
@@ -508,6 +516,9 @@ async function submitReview(isCorrect, status) {
   const payload = {
     chapter_num: currentChapterNum,
     chunk_id: chunk.chunk_id,
+    // Ocena dotyczy planszy, nie jej pozycji na liście — klucz cięcia przeżywa
+    // scalenia i podziały, numer nie.
+    cut_key: chunk.cut_key || null,
     is_correct: isCorrect,
     status: status,
     comment: reviewComment.value.trim(),
@@ -525,13 +536,17 @@ async function submitReview(isCorrect, status) {
     if (res.ok) {
       const msg = isCorrect ? `Zapisano Planszę #${chunk.chunk_id}: Zgodny (OK) ✓` : `Zapisano uwagę (${status}) dla Planszy #${chunk.chunk_id} ✕`;
       showToast(msg, isCorrect ? 'success' : 'error');
-      
+
       if (currentMode === 'random') {
         setTimeout(() => loadSample(), 250);
       }
+    } else {
+      const err = await res.json().catch(() => ({}));
+      showToast(err.detail || 'Nie udało się zapisać oceny.', 'error');
     }
   } catch (err) {
     console.error("Failed saving review:", err);
+    showToast('Błąd połączenia przy zapisie oceny.', 'error');
   }
 }
 
@@ -624,7 +639,7 @@ renderActiveBoard = function(chunk) {
   closeBoardEditor();
 
   // Check if chunk is unaligned / intro-outro
-  const isUnaligned = chunk.chunk_type === 'intro_outro' || chunk.text.includes('(brak tekstu w pliku źródłowym)');
+  const isUnaligned = chunk.chunk_type === 'intro_outro' || chunk.text.includes('(brak tekstu w pliku');
   if (unalignedBanner) {
     unalignedBanner.style.display = isUnaligned ? 'flex' : 'none';
   }
@@ -637,6 +652,11 @@ function openBoardEditor() {
     : (currentSample ? currentSample.chunk : null);
 
   if (!currentChunk) return;
+  if (currentChapterData && currentChapterData.board_source === 'legacy') {
+    alert("Ten rozdział pokazuje plansze ze starego zapisu — poprawka nie miałaby " +
+          "gdzie się zapisać. Przetwórz rozdział ponownie.");
+    return;
+  }
 
   boardContent.style.display = 'none';
   boardEditor.style.display = 'block';
@@ -672,28 +692,35 @@ async function saveBoardEdit() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         chapter_num: currentChapterNum,
+        // Planszę wskazuje klucz cięcia, nie jej numer na liście: numer przesuwa się
+        // przy każdym scaleniu i podziale, a wtedy poprawka trafiała w sąsiednią planszę.
+        cut_key: currentChunk.cut_key || null,
         chunk_id: currentChunk.chunk_id,
         text: newText
       })
     });
 
-    if (res.ok) {
-      const data = await res.json();
-      currentChunk.text = newText;
-      currentChunk.chunk_type = 'edited';
-      boardContent.textContent = newText;
-      closeBoardEditor();
-      showToast(`Zapisano zmiany w Planszy #${currentChunk.chunk_id} ✓`, 'success');
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      alert(err.detail || "Błąd zapisu zmian.");
+      return;
+    }
 
-      // Refresh timeline list
-      if (allChapterChunks.length > 0) {
-        renderTimelineList(allChapterChunks);
-      }
-    } else {
-      alert("Błąd zapisu zmian.");
+    // Odpowiedź niesie planszę przeliczoną przez serwer — bierzemy ją zamiast
+    // zgadywać stan lokalnie, bo korekta mogła zmienić długość i liczbę linii.
+    const data = await res.json();
+    const saved = data.updated_chunk || {};
+    Object.assign(currentChunk, saved);
+    boardContent.textContent = currentChunk.text;
+    closeBoardEditor();
+    showToast(`Zapisano zmiany w Planszy #${currentChunk.chunk_id} ✓`, 'success');
+
+    if (allChapterChunks.length > 0) {
+      renderTimelineList(allChapterChunks);
     }
   } catch (err) {
     console.error("Save edit error:", err);
+    alert("Błąd połączenia przy zapisie zmian.");
   }
 }
 

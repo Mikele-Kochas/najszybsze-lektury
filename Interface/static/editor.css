@@ -112,6 +112,10 @@
 body.bnd-dragging .bnd-gap.ok::before { opacity: .38; transform: translateX(-50%) scaleY(1); }
 body.bnd-dragging { cursor: grabbing; user-select: none; }
 
+/* Zapis podziału w toku — widoczny sygnał, że kolejne kliknięcie nic nie zrobi. */
+body.bnd-busy #bndDoc { opacity: .55; pointer-events: none; }
+body.bnd-busy { cursor: progress; }
+
 /* Suwak podziału: gałka + szyna przez całą szerokość. */
 .bnd-brk {
   display: grid;
@@ -280,3 +284,111 @@ body.bnd-dragging { cursor: grabbing; user-select: none; }
   background: var(--bg-card-alt); border: 1px solid var(--border-color);
   border-radius: 4px; padding: 1px 6px; color: var(--text-secondary);
 }
+
+/* ------------------------------------------- wstawki: brak w pliku txt */
+
+.bnd-insert {
+  margin: 10px 34px 12px 78px;
+  border: 2px dashed var(--accent-turquoise, var(--accent-cyan));
+  border-radius: var(--radius-md);
+  background: var(--tint-turquoise, rgba(6, 182, 212, .08));
+  padding: 10px 14px;
+}
+.bnd-insert.edited { border-style: solid; }
+
+.bnd-ins-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
+.bnd-ins-tag {
+  font-size: 10px; letter-spacing: .07em; text-transform: uppercase; font-weight: 700;
+  color: var(--accent-turquoise, var(--accent-cyan));
+}
+.bnd-ins-time, .bnd-ins-meta { font-size: 11px; color: var(--board-muted); font-variant-numeric: tabular-nums; }
+.bnd-ins-meta { margin-right: auto; }
+
+.bnd-ins-btn {
+  font-size: 11px; padding: 3px 9px; border-radius: 999px;
+  border: 1px solid var(--accent-turquoise, var(--accent-cyan));
+  background: var(--bg-card); color: var(--accent-turquoise, var(--accent-cyan));
+  cursor: pointer; white-space: nowrap;
+}
+.bnd-ins-btn:hover { background: var(--accent-turquoise, var(--accent-cyan)); color: #fff; }
+
+.bnd-ins-part {
+  display: grid; grid-template-columns: 42px minmax(0, 1fr) auto;
+  gap: 10px; align-items: start;
+  padding: 6px 0; border-top: 1px solid var(--board-border);
+}
+.bnd-ins-no { display: flex; flex-direction: column; align-items: flex-start; gap: 1px;
+  font-size: 11px; color: var(--board-muted); font-variant-numeric: tabular-nums; padding-top: 3px; }
+.bnd-ins-no small { font-size: 9px; opacity: .7; }
+.bnd-ins-part p { font-family: var(--font-book, Georgia, serif); font-size: 15px; line-height: 1.65; margin: 0; }
+.bnd-ins-acts { display: flex; gap: 4px; }
+
+/* Szczelina między słowami wstawki — podział dokładnie tam, gdzie klika użytkownik.
+   Ten sam gest co w tekście książki, żeby nie było dwóch różnych sposobów cięcia. */
+.bnd-ins-gap {
+  display: inline-block; width: .32em; position: relative;
+  vertical-align: baseline; cursor: col-resize;
+}
+.bnd-ins-gap::before {
+  content: ""; position: absolute; left: 50%; top: -.24em; bottom: -.24em; width: 2px;
+  transform: translateX(-50%) scaleY(.45);
+  background: var(--accent-turquoise, var(--accent-cyan));
+  border-radius: 2px; opacity: 0; transition: opacity .12s, transform .12s;
+}
+.bnd-ins-text:hover .bnd-ins-gap::before { opacity: .22; transform: translateX(-50%) scaleY(.75); }
+.bnd-ins-gap:hover::before { opacity: 1; transform: translateX(-50%) scaleY(1.15); }
+
+/* Granica wewnątrz wstawki — przesuwana o słowo, jak granica w tekście książki. */
+.bnd-ins-brk {
+  display: flex; align-items: center; gap: 8px;
+  padding: 2px 0 2px 52px;
+}
+.bnd-ins-brk-line {
+  flex: 1; height: 1px;
+  background: repeating-linear-gradient(90deg,
+    var(--accent-turquoise, var(--accent-cyan)) 0 4px, transparent 4px 8px);
+  opacity: .35;
+}
+.bnd-ins-brk-no {
+  font-size: 10px; letter-spacing: .04em; text-transform: uppercase;
+  color: var(--board-muted); white-space: nowrap;
+}
+.bnd-ins-brk .bnd-ins-btn { min-width: 30px; padding: 2px 8px; font-size: 13px; line-height: 1.3; }
+.bnd-ins-btn[disabled] { opacity: .3; cursor: default; pointer-events: none; }
+
+.bnd-ins-editor { margin-top: 10px; }
+.bnd-ins-editor textarea {
+  width: 100%; font-family: var(--font-book, Georgia, serif); font-size: 15px; line-height: 1.6;
+  padding: 10px 12px; border: 2px solid var(--accent-turquoise, var(--accent-cyan));
+  border-radius: var(--radius-md); background: var(--bg-card); color: var(--text-primary);
+  resize: vertical;
+}
+.bnd-ins-editor-acts { display: flex; gap: 8px; align-items: center; margin-top: 8px; flex-wrap: wrap; }
+.bnd-ins-hint { font-size: 11.5px; color: var(--board-muted); margin: 0 0 6px; }
+
+/* Korekta tekstu planszy książkowej */
+.bnd-board.fixed .bnd-text { border-left: 3px solid var(--accent-violet, var(--accent-indigo)); padding-left: 10px; }
+.bnd-fix-editor { grid-column: 2; margin: 0 34px 12px 0; }
+.bnd-fix-editor textarea {
+  width: 100%; font-family: var(--font-book, Georgia, serif); font-size: 15px; line-height: 1.6;
+  padding: 10px 12px; border: 2px solid var(--accent-violet, var(--accent-indigo));
+  border-radius: var(--radius-md); background: var(--bg-card); color: var(--text-primary);
+  resize: vertical;
+}
+/* Przycisk korekty tekstu. Świadomie bez klasy .bnd-add — dzielenie klasy
+   z przyciskiem podziału sprawiało, że jedno kliknięcie wywoływało obie akcje. */
+.bnd-fix {
+  margin-top: 6px;
+  font-size: 10.5px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  border: 1px dashed var(--accent-violet, var(--accent-indigo));
+  background: transparent;
+  color: var(--accent-violet, var(--accent-indigo));
+  cursor: pointer;
+  white-space: nowrap;
+  opacity: .55;
+  transition: opacity .12s, background .12s, color .12s, border-color .12s;
+}
+.bnd-board:hover .bnd-fix { opacity: 1; }
+.bnd-fix:hover { background: var(--accent-violet, var(--accent-indigo)); border-color: var(--accent-violet, var(--accent-indigo)); color: #fff; }
