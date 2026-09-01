@@ -6,16 +6,49 @@
 
 ---
 
+## ⚡ Pierwsze uruchomienie
+
+Potrzebny **Docker** oraz karta **NVIDIA** ze sterownikami (szczegóły i wariant bez GPU
+niżej, w sekcji [Uruchomienie z Dockerem](#-uruchomienie-z-dockerem)).
+
+```bash
+git clone <adres-repozytorium>
+cd "Najszybsze Lektury"
+docker compose up -d --build      # pierwszy build ok. 5 GB, potem już z cache
+# http://localhost:8000
+```
+
+Czego się spodziewać przy pierwszym starcie:
+
+- **`Data/` jest puste i tak ma być.** Materiały (`.txt` + nagrania) wgrywa się
+  w kroku „Projekt" w interfejsie. Repozytorium zawiera narzędzie, nie obrabiane książki.
+- **Model Whisper pobiera się przy pierwszym przetwarzaniu** (kilkaset MB, potrzebny
+  internet). Trafia do wolumenu `whisper_models`, więc kolejne uruchomienia go nie ściągają.
+- Jeśli `pip install` przerywa build błędem `CERTIFICATE_VERIFY_FAILED`, w sieci działa
+  skanowanie HTTPS — patrz [Sieci z przechwytywaniem TLS](#sieci-z-przechwytywaniem-tls).
+
+Zamierzasz zmieniać kod? Zajrzyj do [Tryb deweloperski](#tryb-deweloperski--praca-nad-kodem) —
+bez tego każda edycja wymaga przebudowy obrazu.
+
+---
+
 ## 🔄 Przepływ pracy
 
-Aplikacja prowadzi przez cztery kroki widoczne w górnej nawigacji:
+Aplikacja prowadzi przez sześć kroków widocznych w górnej nawigacji:
 
 | Krok | Widok | Co się dzieje |
 |------|-------|----------------|
 | **1** | **Projekt** | Wgrywasz `.txt` z tekstem książki i pliki audio (przeciągnij lub wybierz). Ustawiasz model Whisper, urządzenie i parametry plansz. |
 | **2** | **Rozdziały** | Aplikacja wykrywa podział na rozdziały i przypisuje im nagrania. Sprawdzasz i poprawiasz mapę, a potem uruchamiasz przetwarzanie. |
-| **3** | **Weryfikacja** | Odsłuchujesz plansze (losowe próbki lub ciągłe odtwarzanie), oceniasz dopasowanie i poprawiasz teksty wtrąceń. |
-| **4** | **Eksport** | Budujesz paczkę i pobierasz ZIP. |
+| **3** | **Granice** | Ręczny montaż podziału na plansze: dzielisz, scalasz i przesuwasz granice, poprawiasz teksty. Działa **bez nagrania** — podział zależy tylko od tekstu. |
+| **4** | **Cięcia** | Dopracowujesz punkt cięcia każdej granicy na fali dźwięku; automat dosuwa go do ciszy, ty masz ostatnie słowo. |
+| **5** | **Weryfikacja** | Odsłuchujesz plansze (losowe próbki lub ciągłe odtwarzanie) i oceniasz dopasowanie. |
+| **6** | **Eksport** | Budujesz paczkę i pobierasz ZIP. |
+
+Kroki 3 i 4 są opcjonalne — automat proponuje kompletny podział i czasy, więc da się
+przejść z kroku 2 wprost do eksportu. Zatwierdzone ręcznie granice, czasy cięć i poprawki
+tekstu **przeżywają ponowne przetworzenie rozdziału** (leżą w `Data/Layouts/`, osobno
+od wyników Whispera).
 
 Jedna instancja obsługuje **jedną aktywną książkę**. Wgranie nowych materiałów zastępuje poprzedni
 projekt, ale jego pliki źródłowe (`.txt` i nagrania) są **przenoszone do `Data/Poprzedni_projekt/`**,
@@ -155,6 +188,39 @@ docker compose ps               # stan i healthcheck
 docker compose down             # zatrzymanie
 ```
 
+### Tryb deweloperski — praca nad kodem
+
+Domyślny obraz ma kod **zapieczony w środku**, więc każda zmiana wymagałaby przebudowy.
+Nakładka `docker-compose.dev.yml` montuje `Engine/`, `Interface/` i `Tests/` z dysku:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
+```
+
+Od tego momentu pętla pracy to:
+
+1. edytujesz plik u siebie,
+2. `docker compose restart` — kilka sekund, **bez** przebudowy obrazu,
+3. odświeżasz przeglądarkę.
+
+Przebudowa (`--build`) jest potrzebna wyłącznie po zmianie `requirements.txt` albo
+`Dockerfile`. Wariant produkcyjny zostaje nietknięty — `docker compose up -d --build`
+bez `-f` nadal uruchamia obraz z kodem w środku.
+
+Zmiany w CSS i JS wchodzą po zwykłym odświeżeniu strony: serwer wysyła dla plików
+statycznych `Cache-Control: no-cache`, więc przeglądarka za każdym razem pyta o nowszą
+wersję (przy niezmienionym pliku dostaje 304, więc nic to nie kosztuje).
+
+> `Interface/server.py` obsługuje też `RELOAD=1` (przeładowanie po zapisie pliku, bez
+> `restart`). Jest **domyślnie wyłączone i niezweryfikowane** — na Windows potrafi się
+> zawiesić. `restart` jest przewidywalny i działa wszędzie.
+
+Testy w kontenerze:
+
+```bash
+docker compose exec najszybsze-lektury python -m pytest Tests -q
+```
+
 ## 💻 Uruchomienie lokalne
 
 ```bash
@@ -201,7 +267,10 @@ Najszybsze Lektury/
 │   ├── chapter_matcher.py   # wykrywanie rozdziałów: nagłówki + kotwice audio
 │   ├── transcriber.py       # Faster-Whisper, cache, próbki do kotwic
 │   ├── aligner.py           # dopasowanie sekwencyjne + wykrywanie wtrąceń
-│   ├── chunker.py           # podział na plansze
+│   ├── chunker.py           # podział startowy na plansze (propozycja automatu)
+│   ├── layout.py            # PODZIAŁ JAKO EDYTOWALNY BYT: granice, korekty, wstawki
+│   ├── timing.py            # czasy cięć z podziału + ciszy w nagraniu
+│   ├── audio_analysis.py    # obwiednia, wykrywanie ciszy, fala do rysowania
 │   ├── srt_writer.py        # generowanie SRT
 │   ├── exporter.py          # /// , etykiety Audacity, cięcie MP3, ZIP
 │   └── pipeline.py          # orkiestrator + CLI
@@ -209,14 +278,30 @@ Najszybsze Lektury/
 ├── Interface/
 │   ├── server.py            # API FastAPI
 │   └── static/
-│       ├── index.html       # powłoka czterech widoków
+│       ├── index.html       # powłoka sześciu widoków
 │       ├── setup.js         # projekt, upload, kreator, zadania, eksport
 │       ├── app.js           # studio weryfikacji
-│       ├── style.css
-│       └── setup.css
+│       ├── editor.js        # montaż: granice plansz i punkty cięcia
+│       ├── style.css        # warstwa bazowa
+│       ├── setup.css        # warstwa produkcyjna
+│       ├── editor.css       # ekrany montażu
+│       ├── theme.css        # motyw „Bajka" — wczytywany OSTATNI, nadpisuje resztę
+│       └── favicon*, logo*  # znak marki (generowane z brand/)
+│
+├── Tests/                   # pytest; uruchomienie: python -m pytest Tests -q
+│   ├── test_layout.py       # tokenizacja, granice, operacje edycyjne
+│   ├── test_timing.py       # cięcia, dosuwanie do ciszy, kolejność
+│   ├── test_inserts.py      # wstawki i korekty tekstu
+│   ├── test_board_identity.py  # KTÓRA plansza dostaje poprawkę (cut_key)
+│   └── test_persistence.py  # trwałość korekt i zapisu podziału
+│
+├── brand/
+│   ├── logo-source.jpg      # źródło znaku marki
+│   └── build_assets.py      # generuje favicony i logo do Interface/static/
 │
 ├── Dockerfile
-├── docker-compose.yml
+├── docker-compose.yml       # wariant produkcyjny (kod w obrazie)
+├── docker-compose.dev.yml   # nakładka deweloperska (kod z dysku)
 └── PROJECT_PLAN.md
 ```
 

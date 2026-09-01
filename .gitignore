@@ -17,6 +17,10 @@ Doktor Dollitle/
 # Oceny jakości zbierane lokalnie w studiu weryfikacji
 Interface/reviews.json
 
+# Zrzuty ekranu robione przy zgłaszaniu błędów — materiał roboczy jednej osoby,
+# nieprzydatny reszcie i szybko dezaktualizujący się.
+issues_screenshots/
+
 # Ustawienia edytorów i systemu
 .vscode/
 .idea/

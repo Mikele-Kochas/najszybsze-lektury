@@ -1,0 +1,29 @@
+# Nakładka deweloperska: kod bierze się z katalogu na dysku, a nie z obrazu.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
+#
+# Po tej komendzie pętla pracy wygląda tak:
+#
+#   1. edytujesz plik w Engine/ albo Interface/ u siebie
+#   2. docker compose restart          <- kilka sekund, bez przebudowy obrazu
+#   3. odświeżasz przeglądarkę
+#
+# Przebudowa (`--build`) jest potrzebna wyłącznie po zmianie requirements.txt
+# albo Dockerfile.
+#
+# Obraz produkcyjny zostaje nietknięty: `docker compose up -d --build` bez `-f`
+# nadal uruchamia wersję z kodem zapieczonym w środku.
+#
+# Automatyczne przeładowanie po zapisie pliku (RELOAD=1 w Interface/server.py)
+# jest świadomie NIEwłączone: na Windows potrafi się zawiesić, a w kontenerze
+# nie zostało zweryfikowane. `restart` jest przewidywalny i działa wszędzie.
+services:
+  najszybsze-lektury:
+    volumes:
+      # Katalogi z kodem montowane pojedynczo, a nie całe repo: podmontowanie `.`
+      # przykryłoby /app razem z tym, co Dockerfile w nim przygotował.
+      # Compose SCALA listy volumes po ścieżce docelowej, więc ./Data i cache modeli
+      # z docker-compose.yml zostają — nie trzeba ich tu powtarzać.
+      - ./Engine:/app/Engine
+      - ./Interface:/app/Interface
+      - ./Tests:/app/Tests
