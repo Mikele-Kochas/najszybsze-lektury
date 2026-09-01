@@ -246,6 +246,9 @@
   border-radius: 13px;
   background: rgba(139, 124, 246, 0.11);
   border: 1px solid rgba(139, 124, 246, 0.32);
+  /* Jak nagłówek: to dziecko kolumny flex o wysokości ekranu i bez tego bywa
+     ściskane, gdy pod nim jest długa lista. Pasek postępu ma być zawsze czytelny. */
+  flex-shrink: 0;
 }
 
 .job-bar-head {

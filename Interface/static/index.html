@@ -4,6 +4,15 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Najszybsze Lektury — Studio Produkcyjne</title>
+  <!-- Znak w kilku rozmiarach: przy 16 i 32 px kreski logo są za cienkie, żeby
+       przetrwały zmniejszenie, więc każdy rozmiar ma własną, pogrubioną wersję.
+       favicon.ico zostaje dla Windows i starszych przeglądarek. -->
+  <link rel="icon" href="favicon.ico" sizes="any">
+  <link rel="icon" type="image/png" sizes="16x16" href="favicon-16.png">
+  <link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png">
+  <link rel="icon" type="image/png" sizes="48x48" href="favicon-48.png">
+  <link rel="icon" type="image/png" sizes="64x64" href="favicon-64.png">
+  <link rel="apple-touch-icon" href="apple-touch-icon.png">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@600;700&family=Inter:wght@300;400;500;600;700&family=Merriweather:ital,wght@0,300;0,400;0,700;1,300;1,400&family=Outfit:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -17,7 +26,8 @@
     <!-- ================= HEADER ================= -->
     <header class="app-header">
       <div class="logo-group">
-        <div class="logo-icon">📖</div>
+        <img class="logo-icon" src="logo-mark.png" width="44" height="44"
+             alt="Najszybsze Lektury">
         <div>
           <h1 class="app-title">Najszybsze Lektury</h1>
           <p class="app-subtitle" id="projectSubtitle">Brak projektu — wgraj tekst i nagrania</p>

@@ -58,6 +58,11 @@ body {
   border: 1px solid var(--border-color);
   border-radius: var(--radius-lg);
   backdrop-filter: blur(10px);
+  /* .app-container to kolumna flex o wysokości 100vh, więc przy treści wyższej niż
+     ekran przeglądarka ściska po kolei wszystkie dzieci — a nagłówek jest pierwszy
+     w kolejce. Bez tego logo, tytuł i podtytuł były przycinane na tych ekranach,
+     gdzie lista rozdziałów albo plansz nie mieści się w oknie. */
+  flex-shrink: 0;
 }
 
 .logo-group {
@@ -67,9 +72,12 @@ body {
 }
 
 .logo-icon {
-  font-size: 28px;
+  width: 44px;
+  height: 44px;
+  box-sizing: border-box;
+  padding: 4px;
+  object-fit: contain;
   background: linear-gradient(135deg, rgba(99, 102, 241, 0.2), rgba(6, 182, 212, 0.2));
-  padding: 6px 10px;
   border-radius: var(--radius-md);
   border: 1px solid var(--border-color);
 }
