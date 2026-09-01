@@ -695,11 +695,55 @@ def cancel_job(job_id: str):
     return {"success": True, "job": jobs.get(job_id).to_dict()}
 
 
+class RewalidowaneStaticFiles(StaticFiles):
+    """
+    Pliki statyczne, o które przeglądarka pyta przy każdym wejściu.
+
+    StaticFiles wysyła `last-modified` i `etag`, ale nie wysyła `Cache-Control`.
+    Bez tego nagłówka przeglądarka cachuje heurystycznie — trzyma kopię i NIE pyta
+    serwera, czy jest nowsza. Efekt: poprawka w CSS albo JS nie dociera do ekranu,
+    dopóki ktoś nie zrobi twardego odświeżenia. W narzędziu, które się na bieżąco
+    modyfikuje, to gubi godziny na ściganiu błędów naprawionych dawno temu.
+
+    `no-cache` nie wyłącza cache — pozwala trzymać kopię, ale wymusza rewalidację.
+    Przy niezmienionym pliku serwer odpowiada 304 bez treści, więc koszt jest zerowy.
+    """
+
+    def file_response(self, *args, **kwargs):
+        resp = super().file_response(*args, **kwargs)
+        resp.headers["Cache-Control"] = "no-cache"
+        return resp
+
+
 # Frontend montowany na końcu, aby nie przechwytywał ścieżek /api/*.
 os.makedirs(STATIC_DIR, exist_ok=True)
-app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")
+app.mount("/", RewalidowaneStaticFiles(directory=STATIC_DIR, html=True), name="static")
 
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host=os.environ.get("HOST", "127.0.0.1"), port=int(os.environ.get("PORT", "8000")))
+
+    host = os.environ.get("HOST", "127.0.0.1")
+    port = int(os.environ.get("PORT", "8000"))
+    reload = os.environ.get("RELOAD", "").strip().lower() in ("1", "true", "tak", "yes")
+
+    if reload:
+        # Przeladowanie wymaga sciezki importu, a nie obiektu aplikacji - uvicorn
+        # importuje modul na nowo w podprocesie.
+        #
+        # Obserwujemy WYLACZNIE katalogi z kodem. Domyslnie uvicorn pilnowalby calego
+        # drzewa razem z Data/, gdzie w trakcie przetwarzania powstaja pliki cache,
+        # wyniki rozdzialow i podzialy - kazdy zapis restartowalby serwer w kolko,
+        # przerywajac wlasnie trwajaca transkrypcje.
+        uvicorn.run(
+            "Interface.server:app",
+            host=host, port=port, reload=True,
+            # Katalog glowny projektu trafia na sys.path podprocesu. Bez tego import
+            # "Interface.server" zalezalby od tego, z ktorego katalogu uruchomiono
+            # polecenie, i przeladowanie wywracalo by sie z ModuleNotFoundError.
+            app_dir=BASE_DIR,
+            reload_dirs=[os.path.join(BASE_DIR, "Engine"),
+                         os.path.dirname(os.path.abspath(__file__))],
+        )
+    else:
+        uvicorn.run(app, host=host, port=port)
