@@ -7,6 +7,7 @@
   --nl-surface: rgba(255, 255, 255, 0.04);
   --nl-surface-strong: rgba(255, 255, 255, 0.07);
   --nl-border: rgba(255, 255, 255, 0.12);
+  --nl-text: #f2f4fb;
   --nl-text-dim: rgba(233, 236, 245, 0.62);
   --nl-accent: #8b7cf6;
   --nl-ok: #34d399;
@@ -111,7 +112,7 @@
   font-size: 1.08rem;
   font-weight: 600;
   margin: 0 0 8px;
-  color: #f2f4fb;
+  color: var(--nl-text);
 }
 
 .panel-hint {
@@ -167,7 +168,7 @@
 .drop-zone.filled { border-style: solid; border-color: rgba(52, 211, 153, 0.5); }
 .drop-icon { font-size: 1.7rem; }
 .drop-label { font-size: 0.89rem; color: var(--nl-text-dim); }
-.drop-label b { color: #f2f4fb; }
+.drop-label b { color: var(--nl-text); }
 
 .file-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 16px; }
 
@@ -235,7 +236,7 @@
   font-size: 0.85rem;
 }
 .status-list dt { color: var(--nl-text-dim); }
-.status-list dd { margin: 0; color: #f2f4fb; font-weight: 500; }
+.status-list dd { margin: 0; color: var(--nl-text); font-weight: 500; }
 
 /* -------------------------------------------------------------- zadania */
 
@@ -256,7 +257,7 @@
   flex-wrap: wrap;
 }
 
-.job-bar-head strong { color: #f2f4fb; }
+.job-bar-head strong { color: var(--nl-text); }
 .job-message { flex: 1; color: var(--nl-text-dim); font-size: 0.82rem; min-width: 160px; }
 .job-percent { font-weight: 700; color: var(--nl-accent); font-variant-numeric: tabular-nums; }
 
@@ -339,7 +340,7 @@
   border-radius: 7px;
   border: 1px solid var(--nl-border);
   background: rgba(0, 0, 0, 0.28);
-  color: #f2f4fb;
+  color: var(--nl-text);
   font-family: inherit;
   font-size: 0.8rem;
 }
@@ -441,7 +442,7 @@
   border-radius: 7px;
   border: 1px solid var(--nl-border);
   background: rgba(255, 255, 255, 0.06);
-  color: #e9ecf5;
+  color: var(--nl-text);
   font-family: inherit;
   font-size: 0.74rem;
   font-weight: 600;

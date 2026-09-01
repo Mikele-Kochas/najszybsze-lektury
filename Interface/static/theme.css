@@ -38,6 +38,12 @@
   --accent-lime: #8cc63f;
   --accent-tangerine: #f0873c;
 
+  /* Ciemniejsze warianty do TEKSTU. Turkus i limonka są dobrane pod wypełnienia
+     i plamy koloru — jako litery na pergaminie dają poniżej 3:1 i robią się mgliste.
+     Te same barwy, tylko przyciemnione na tyle, by dało się je czytać. */
+  --turquoise-deep: #0d7a76;
+  --lime-deep: #5f8f26;
+
   --tint-indigo: rgba(122, 91, 181, .14);
   --tint-rose: rgba(194, 65, 107, .12);
   --tint-emerald: rgba(78, 140, 90, .14);
@@ -61,6 +67,21 @@
 
   --font-book: 'Merriweather', Georgia, 'Times New Roman', serif;
   --font-title: 'Cinzel', Georgia, serif;
+
+  /* Paleta warstwy produkcyjnej (setup.css). Zapisano ją pod ciemne tło: powierzchnie
+     to biel na niskiej przezroczystości, a tekst — blady błękit. Na pergaminie biel
+     na bieli jest niewidoczna, a blady tekst nieczytelny, więc te same tokeny
+     przestawiamy na atrament i złoto. Nadpisanie tutaj naprawia wszystkie miejsca
+     naraz — inaczej trzeba by łatać kilkadziesiąt reguł po kolei. */
+  --nl-surface: rgba(212, 149, 42, .10);
+  --nl-surface-strong: rgba(212, 149, 42, .20);
+  --nl-border: var(--border-color);
+  --nl-text: var(--text-primary);
+  --nl-text-dim: var(--text-secondary);
+  --nl-accent: var(--accent-violet);
+  --nl-ok: var(--accent-emerald);
+  --nl-warn: var(--gold-deep);
+  --nl-bad: var(--accent-rose);
 }
 
 /* Tło: pergamin z delikatnym deseniem kropek, żeby nie było płaskiej płachty. */
@@ -208,6 +229,25 @@ body {
 .btn-micro, .btn-icon, .btn-mode, .btn-speed, .btn-sm, .btn-action, .badge-btn {
   border-radius: 999px;
 }
+/* Biały tekst na bladym fiolecie znikał — na pergaminie ten tint jest niemal biały. */
+.badge-btn:hover {
+  background: var(--tint-violet);
+  border-color: var(--accent-violet);
+  color: var(--accent-violet);
+}
+
+/* setup.css definiuje .btn-micro po style.css i wygrywa: prawie biały tekst (#e9ecf5)
+   na 6% bieli. Na ciemnym tle to działało, na pergaminie przycisk był pusty. */
+.btn-micro {
+  background: var(--bg-card-alt);
+  border: 1px solid var(--border-color);
+  color: var(--text-primary);
+}
+.btn-micro:hover {
+  background: var(--tint-gold);
+  border-color: var(--accent-amber);
+  color: var(--gold-deep);
+}
 
 /* ------------------------------------------------------- karty i panele */
 
@@ -323,6 +363,19 @@ body {
   background: var(--bg-card-alt);
   border: 1px solid var(--border-color);
   border-radius: var(--radius-md);
+  color: var(--text-primary);
+}
+/* Najechanie na planszę na osi czasu barwiło ją granatem z ciemnego motywu,
+   zostawiając atramentowy tekst na prawie czarnym tle. Podświetlamy złotym
+   tintem — tekst zostaje ten sam i pozostaje czytelny. */
+.timeline-item:hover {
+  background: var(--tint-gold);
+  border-color: var(--accent-amber);
+  color: var(--text-primary);
+}
+.timeline-item.active {
+  background: var(--tint-pink);
+  border-color: var(--accent-pink);
   color: var(--text-primary);
 }
 .context-curr { background: var(--tint-gold); border-color: var(--accent-amber); }
@@ -442,10 +495,10 @@ body {
 
 /* Liczniki w pasku: każdy w swoim kolorze. */
 .ed-stat:nth-child(1) b { color: var(--accent-violet); }
-.ed-stat:nth-child(2) b { color: var(--accent-turquoise); }
-.ed-stat:nth-child(3) b { color: var(--accent-amber); }
+.ed-stat:nth-child(2) b { color: var(--turquoise-deep); }
+.ed-stat:nth-child(3) b { color: var(--gold-deep); }
 .ed-stat.warn b { color: var(--accent-rose); }
-.ed-stat.good b { color: var(--accent-lime); }
+.ed-stat.good b { color: var(--lime-deep); }
 
 /* Szyna podziału: pasiasta wstążka zamiast szarej kreski. */
 .bnd-brk-line {
@@ -479,12 +532,84 @@ body {
   box-shadow: 0 2px 0 #9c3255, 0 4px 10px rgba(194, 65, 107, .35);
 }
 
-.cut-badge.silence { background: var(--tint-lime); color: #5f8f26; }
+.cut-badge.silence { background: var(--tint-lime); color: var(--lime-deep); }
 .cut-badge.manual  { background: var(--tint-violet); color: #7a3fa6; }
 .cut-row.active { background: var(--tint-pink); border-left-color: var(--accent-pink); }
 .st-manual   { color: var(--accent-violet); }
-.st-reviewed { color: var(--accent-lime); }
+.st-reviewed { color: var(--lime-deep); }
 .zoombtns button.active {
-  background: var(--accent-turquoise); border-color: #0e8b87; color: #fff;
+  background: var(--turquoise-deep); border-color: #0a5f5c; color: #fff;
 }
 .cut-time { color: var(--accent-pink-deep); font-family: var(--font-title); }
+
+/* --------------------------------------- resztki po ciemnym motywie (kontrast) */
+
+/* Skrót klawiszowy w karcie podpowiedzi: jasny tekst na jasnym pergaminie. */
+.tip-card kbd { color: var(--text-primary); background: var(--bg-card-alt); }
+
+/* Fragment tekstu w tabeli rozdziałów — blady błękit z ciemnego motywu, na
+   pergaminie praktycznie niewidoczny. */
+.cell-snippet { color: var(--text-muted); }
+
+/* Podświetlenie wiersza tabeli malowało tło na komórce (biel na 3%), przykrywając
+   złoty tint ustawiony na wierszu — najechanie nie dawało żadnego sygnału. */
+.map-table tr:hover td { background: transparent; }
+
+/* Pole edycji w tabeli rozdziałów miało ciemne tło z poprzedniego motywu —
+   czarny prostokąt na pergaminie. */
+.cell-input {
+  background: var(--bg-card);
+  color: var(--text-primary);
+  border-color: var(--border-color);
+}
+.cell-input:focus { border-color: var(--accent-amber); outline: none; }
+
+/* Nazwa poprzedniego projektu i ścieżka w notatce archiwum: jasny fiolet oraz
+   czarne tło pod <code> to znowu resztki po ciemnym motywie. */
+.archive-note b { color: var(--accent-violet); }
+.archive-note code {
+  background: var(--bg-card-alt);
+  color: var(--text-primary);
+  border: 1px solid var(--border-color);
+}
+
+/* Blade błękity i fiolety dobrane pod ciemne tło. Na pergaminie dawały kontrast
+   rzędu 1,5:1 — tekst był technicznie obecny, ale nieczytelny. Zastępujemy je
+   nasyconymi odpowiednikami z palety motywu. */
+.time-val { color: var(--accent-cyan); background: var(--tint-turquoise); }
+.time-label { color: var(--text-secondary); }
+.timeline-item-title { color: var(--accent-pink-deep); }
+.timeline-item-time { color: var(--text-secondary); }
+.badge-btn { background: var(--bg-card-alt); border-color: var(--border-color); color: var(--accent-violet); }
+.tip-card h4 { color: var(--gold-deep); }
+.file-chip.total { background: var(--tint-violet); color: var(--accent-violet); }
+.badge { color: var(--accent-violet); }
+
+/* Ikona i podpis w banerze wtrącenia dziedziczyły biel po ciemnym motywie. */
+.unaligned-banner .btn-icon { color: var(--accent-rose); }
+.unaligned-banner small { color: var(--text-secondary); }
+
+/* Przycisk „Brak w źródle" został pominięty przy przenoszeniu motywu: bursztynowy
+   tekst na bursztynowym tincie dawał 1,5:1. Dostaje pełny wariant, jak jego dwaj
+   sąsiedzi (.btn-success i .btn-danger). */
+.btn-warning {
+  background: linear-gradient(150deg, #f0a65c, var(--accent-tangerine));
+  color: #fff;
+  border: 2px solid #c2621f;
+  box-shadow: 0 3px 0 #a5541a, inset 0 1px 0 rgba(255, 255, 255, .3);
+}
+.btn-warning:hover { filter: brightness(1.06); transform: translateY(-1px); }
+.btn-warning .btn-icon, .btn-warning strong, .btn-warning small { color: #fff; }
+.btn-success .btn-icon, .btn-success strong, .btn-success small,
+.btn-danger .btn-icon, .btn-danger strong, .btn-danger small { color: #fff; }
+.kbd-key { background: rgba(0, 0, 0, .22); color: #fff; }
+
+/* Znacznik czasu: turkus motywu jest za jasny na własnym tincie. */
+.time-val { color: #0d7a76; }
+
+/* Fragment kodu w podpowiedziach panelu: blady fiolet z ciemnego motywu (1,5:1). */
+.panel-hint code {
+  background: var(--tint-violet);
+  color: #7a3fa6;
+  border: 1px solid rgba(155, 89, 201, .3);
+}
